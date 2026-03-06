@@ -1,0 +1,129 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import Layout from '@/components/Layout';
+import { format } from 'date-fns';
+import { ja } from 'date-fns/locale';
+
+interface SearchResult {
+    date: string;
+    taskId: string;
+    title: string;
+}
+
+export default function SearchPage() {
+    const router = useRouter();
+    const [searchQuery, setSearchQuery] = useState('');
+    const [results, setResults] = useState<SearchResult[]>([]);
+    const [userId, setUserId] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [hasSearched, setHasSearched] = useState(false);
+
+    useEffect(() => {
+        const checkAuth = async () => {
+            const res = await fetch('/api/auth/me');
+            if (!res.ok) { router.push('/login'); return; }
+            const { user } = await res.json() as any;
+            setUserId(user.id);
+        };
+        checkAuth();
+    }, [router]);
+
+    const handleSearch = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!searchQuery.trim() || !userId) return;
+
+        setLoading(true);
+        setHasSearched(true);
+
+        try {
+            const response = await fetch(`/api/tasks/search?q=${encodeURIComponent(searchQuery)}`);
+            if (response.ok) {
+                const data = await response.json() as any;
+                setResults(data.results || []);
+            } else {
+                setResults([]);
+            }
+        } catch (error) {
+            console.error('Search failed:', error);
+            setResults([]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDateClick = (dateStr: string) => {
+        router.push(`/top?date=${dateStr}`);
+    };
+
+    if (!userId) {
+        return (
+            <Layout>
+                <div className="flex items-center justify-center min-h-screen">
+                    <span className="loading loading-spinner loading-lg"></span>
+                </div>
+            </Layout>
+        );
+    }
+
+    return (
+        <Layout>
+            <div className="container mx-auto px-4 py-6">
+                <h1 className="text-2xl font-bold mb-6">検索ページ</h1>
+
+                <form onSubmit={handleSearch} className="mb-6">
+                    <div className="flex gap-4">
+                        <input
+                            type="text"
+                            placeholder="検索したいワードを入力"
+                            className="input input-bordered flex-1"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                        />
+                        <button
+                            type="submit"
+                            className="btn btn-primary"
+                            disabled={loading || !searchQuery.trim()}
+                        >
+                            {loading ? <span className="loading loading-spinner"></span> : '検索'}
+                        </button>
+                    </div>
+                </form>
+
+                {hasSearched && (
+                    <div className="space-y-2">
+                        {loading ? (
+                            <div className="flex items-center justify-center py-12">
+                                <span className="loading loading-spinner loading-lg"></span>
+                            </div>
+                        ) : results.length > 0 ? (
+                            results.map((result, index) => {
+                                const date = new Date(result.date);
+                                const dateStr = format(date, 'yyyy-MM-dd');
+                                const displayDate = format(date, 'yyyy年M月d日(E)', { locale: ja });
+
+                                return (
+                                    <button
+                                        key={`${result.taskId}-${dateStr}-${index}`}
+                                        onClick={() => handleDateClick(dateStr)}
+                                        className="btn btn-outline w-full justify-start text-left"
+                                    >
+                                        <div className="flex flex-col items-start w-full gap-1">
+                                            <span className="text-sm text-base-content/70">{displayDate}</span>
+                                            <span className="text-base">{result.title}</span>
+                                        </div>
+                                    </button>
+                                );
+                            })
+                        ) : (
+                            <div className="alert alert-info">
+                                <span>検索結果が見つかりませんでした</span>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        </Layout>
+    );
+}
