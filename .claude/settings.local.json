@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -l \"supabase\\\\|createClient\" \"C:/Users/itonl/Desktop/01_Frontend/sakutto-task/src/components/\"*.tsx)",
+      "Bash(npx wrangler d1 execute sakutto-task-db --remote --command=\"SELECT name FROM sqlite_master WHERE type=''table'' ORDER BY name;\")",
+      "Bash(npx wrangler d1 execute sakutto-task-db --file=db/schema.sql --remote)"
+    ]
+  }
+}

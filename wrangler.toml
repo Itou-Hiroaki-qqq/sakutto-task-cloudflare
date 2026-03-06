@@ -1,0 +1,12 @@
+name = "sakutto-task"
+main = ".open-next/worker.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = ".open-next/assets"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sakutto-task-db"
+database_id = "75b7aa40-1655-46ae-bb20-52b67e1b4679"  # wrangler d1 create sakutto-task-db で発行
