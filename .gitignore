@@ -26,6 +26,7 @@ yarn-error.log*
 # local env files
 .env*.local
 .env
+.env.migration
 
 # Cloudflare Workersのシークレット（Gitに含めない）
 .dev.vars
