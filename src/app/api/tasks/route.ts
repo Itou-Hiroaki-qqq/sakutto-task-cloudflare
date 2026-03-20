@@ -4,10 +4,11 @@ import {
     getTasksForDate,
     getTasksBasicForDate,
     updateTasksWithCompletionStatus,
-    getOverdueTaskDates,
+    getCarryoverTasks,
 } from '@/lib/tasks';
+import { getTodayJST } from '@/lib/timezone';
 import { getDB } from '@/lib/db';
-import { isSameDay, startOfDay, format } from 'date-fns';
+import { isSameDay } from 'date-fns';
 
 export async function GET(request: NextRequest) {
     try {
@@ -33,21 +34,18 @@ export async function GET(request: NextRequest) {
             tasks = await getTasksForDate(payload.uid, date);
         }
 
-        const today = startOfDay(new Date());
-        const targetDate = startOfDay(date);
-        let overdueDates: Date[] = [];
-        if (!basic && isSameDay(targetDate, today)) {
+        // 今日（JST）のリクエスト時のみ、過去の未完了タスクを引継ぎタスクとしてマージ
+        const todayJST = getTodayJST();
+        if (!basic && isSameDay(date, todayJST)) {
             try {
-                overdueDates = await getOverdueTaskDates(payload.uid, today);
-            } catch (overdueError) {
-                console.error('Error fetching overdue dates (non-fatal):', overdueError);
+                const carryoverTasks = await getCarryoverTasks(payload.uid, todayJST);
+                tasks = [...tasks, ...carryoverTasks];
+            } catch (carryoverError) {
+                console.error('Error fetching carryover tasks (non-fatal):', carryoverError);
             }
         }
 
-        return NextResponse.json({
-            tasks,
-            overdueDates: overdueDates.map(d => format(d, 'yyyy-MM-dd')),
-        });
+        return NextResponse.json({ tasks });
     } catch (error) {
         console.error('Error fetching tasks:', error);
         return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

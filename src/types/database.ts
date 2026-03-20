@@ -59,6 +59,8 @@ export interface DisplayTask {
     holiday_name?: string;
     is_recurring?: boolean;  // 繰り返しタスクかどうか
     created_at?: Date;  // 作成日時（ソート用）
+    is_carryover?: boolean;     // 引継ぎタスクかどうか
+    original_date?: Date;       // 引継ぎ元の日付（元々のdue_dateまたは繰り返し出現日）
 }
 
 // ユーザー通知設定

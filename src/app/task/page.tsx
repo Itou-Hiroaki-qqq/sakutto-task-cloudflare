@@ -17,6 +17,8 @@ function TaskEditPageContent() {
     // URLパラメータから取得
     const taskIdParam = searchParams.get('taskId');
     const dateParam = searchParams.get('date');
+    const carryoverParam = searchParams.get('carryover');
+    const isCarryover = carryoverParam === 'true';
     const initialDate = dateParam ? parseISO(dateParam) : new Date();
 
     // フォーム状態
@@ -38,15 +40,19 @@ function TaskEditPageContent() {
     const [showDeleteDialog, setShowDeleteDialog] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [showSaveScopeDialog, setShowSaveScopeDialog] = useState(false);
+    const [completionDate, setCompletionDate] = useState<string | null>(null); // 引継ぎタスクの完了日
 
     // 認証とタスク取得を並列実行して遷移を速くする
     useEffect(() => {
         const dateParam = searchParams.get('date');
 
         const run = async () => {
+            const taskFetchUrl = taskIdParam
+                ? `/api/tasks/${taskIdParam}${dateParam ? `?date=${dateParam}` : ''}`
+                : null;
             const [meResponse, taskResponse] = await Promise.all([
                 fetch('/api/auth/me'),
-                taskIdParam ? fetch(`/api/tasks/${taskIdParam}`) : Promise.resolve(null),
+                taskFetchUrl ? fetch(taskFetchUrl) : Promise.resolve(null),
             ]);
 
             if (!meResponse.ok) {
@@ -126,6 +132,10 @@ function TaskEditPageContent() {
                         setCustomDays(null);
                         setCustomUnit('days');
                         setSelectedWeekdays([]);
+                    }
+                    // 引継ぎタスクの完了情報を取得
+                    if (isCarryover && data.completion?.completed) {
+                        setCompletionDate(data.completion.updated_at || data.completion.completed_date);
                     }
                 } else {
                     const errorData = await taskResponse.json() as any;
@@ -748,6 +758,20 @@ function TaskEditPageContent() {
                         900や1425と入力すると9:00、14:25と変換できます
                     </p>
                 </div>
+
+                {/* 引継ぎタスク情報 */}
+                {isCarryover && dateParam && (
+                    <div className="alert alert-warning mb-6">
+                        <span className="material-icons">warning</span>
+                        <span>
+                            {format(parseISO(dateParam), 'M月d日', { locale: ja })}の未完了タスク
+                            {completionDate
+                                ? ` - ${format(new Date(completionDate), 'M月d日', { locale: ja })}に完了`
+                                : 'です'
+                            }
+                        </span>
+                    </div>
+                )}
 
                 {/* 期日選択 */}
                 <div className="form-control mb-6">

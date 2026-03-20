@@ -225,15 +225,16 @@ export async function updateTasksWithCompletionStatus(
     });
 }
 
-// 未完了の過去タスクがある日を取得
-export async function getOverdueTaskDates(userId: string, today: Date): Promise<Date[]> {
+// 未完了の過去タスクを引継ぎタスクとして取得（過去30日・最大50件）
+export async function getCarryoverTasks(userId: string, todayJST: Date): Promise<DisplayTask[]> {
     const db = await getDB();
-    const todayStart = startOfDay(today);
+    const todayStart = startOfDay(todayJST);
+    const thirtyDaysAgo = addDays(todayStart, -30);
 
     const { results: tasks } = await db
         .prepare(`
             SELECT
-                t.id, t.user_id, t.title, t.due_date, t.created_at,
+                t.id, t.user_id, t.title, t.due_date, t.notification_time, t.created_at,
                 tr.type as recurrence_type, tr.custom_days, tr.custom_unit,
                 tr.weekdays as recurrence_weekdays
             FROM tasks t
@@ -244,62 +245,85 @@ export async function getOverdueTaskDates(userId: string, today: Date): Promise<
         .bind(userId)
         .all<any>();
 
-    const overdueCompletionPairs: Array<{ taskId: string; date: Date }> = [];
-    const recurringTaskIds: string[] = [];
-
-    for (const task of tasks) {
-        const taskDueDate = new Date(task.due_date);
-        taskDueDate.setHours(0, 0, 0, 0);
-        if (isBefore(taskDueDate, todayStart)) {
-            if (!task.recurrence_type) {
-                overdueCompletionPairs.push({ taskId: task.id, date: taskDueDate });
-            } else {
-                recurringTaskIds.push(task.id);
-            }
-        }
-    }
-
+    // タスクと元の出現日のペアを収集
+    const carryoverPairs: Array<{ task: any; originalDate: Date }> = [];
+    const recurringTaskIds = tasks.filter(t => t.recurrence_type).map(t => t.id);
     const exclusionsMap = await getTaskExclusionsBatch(db, recurringTaskIds);
 
     for (const task of tasks) {
         const taskDueDate = new Date(task.due_date);
         taskDueDate.setHours(0, 0, 0, 0);
-        if (isBefore(taskDueDate, todayStart) && task.recurrence_type) {
-            const exclusions = exclusionsMap.get(task.id) || null;
-            let excludeAfterDate: Date | null = null;
-            if (exclusions) {
-                for (const ex of exclusions) {
-                    if (ex.exclusion_type === 'after' && ex.excluded_date < todayStart) {
-                        excludeAfterDate = ex.excluded_date;
-                        break;
+
+        if (!task.recurrence_type) {
+            // 単発タスク: 30日以内の過去 due_date のもの
+            if (isBefore(taskDueDate, todayStart) && !isBefore(taskDueDate, thirtyDaysAgo)) {
+                carryoverPairs.push({ task, originalDate: taskDueDate });
+            }
+        } else {
+            // 繰り返しタスク: thirtyDaysAgo から todayStart の間の出現日を取得
+            if (isBefore(taskDueDate, todayStart)) {
+                const exclusions = exclusionsMap.get(task.id) || null;
+
+                // 'after' 除外が taskDueDate より前にある場合はスキップ
+                let excludeAfterDate: Date | null = null;
+                if (exclusions) {
+                    for (const ex of exclusions) {
+                        if (ex.exclusion_type === 'after' && ex.excluded_date < todayStart) {
+                            excludeAfterDate = ex.excluded_date;
+                            break;
+                        }
+                    }
+                }
+                if (excludeAfterDate && isBefore(excludeAfterDate, taskDueDate)) continue;
+
+                const weekdays = parseWeekdays(task.recurrence_weekdays);
+                // taskDueDate を起点に todayStart(exclusive)までの出現日を計算し、thirtyDaysAgo 以降のものだけ採用
+                const occurrenceDates = getRecurringOccurrenceDates(
+                    task.recurrence_type, taskDueDate, todayStart,
+                    task.custom_days, task.custom_unit, weekdays, exclusions
+                );
+                for (const occurrenceDate of occurrenceDates) {
+                    // 30日以内の出現日のみ
+                    if (!isBefore(occurrenceDate, thirtyDaysAgo)) {
+                        carryoverPairs.push({ task, originalDate: occurrenceDate });
                     }
                 }
             }
-            if (excludeAfterDate && isBefore(excludeAfterDate, taskDueDate)) continue;
-            const weekdays = parseWeekdays(task.recurrence_weekdays);
-            const occurrenceDates = getRecurringOccurrenceDates(
-                task.recurrence_type, taskDueDate, todayStart,
-                task.custom_days, task.custom_unit, weekdays, exclusions
-            );
-            for (const occurrenceDate of occurrenceDates) {
-                overdueCompletionPairs.push({ taskId: task.id, date: occurrenceDate });
-            }
         }
     }
 
-    const completionsMap = await getTaskCompletionsBatch(db, overdueCompletionPairs);
-    const overdueDatesSet = new Set<string>();
-    for (const pair of overdueCompletionPairs) {
-        const key = `${pair.taskId}_${format(pair.date, 'yyyy-MM-dd')}`;
+    // 完了状態を一括取得
+    const completionPairs = carryoverPairs.map(p => ({ taskId: p.task.id, date: p.originalDate }));
+    const completionsMap = await getTaskCompletionsBatch(db, completionPairs);
+
+    // 未完了のもののみ DisplayTask に変換
+    const carryoverTasks: DisplayTask[] = [];
+    for (const { task, originalDate } of carryoverPairs) {
+        const key = `${task.id}_${format(originalDate, 'yyyy-MM-dd')}`;
         const completion = completionsMap.get(key);
         if (!completion?.completed) {
-            overdueDatesSet.add(format(pair.date, 'yyyy-MM-dd'));
+            const taskDueDate = new Date(task.due_date);
+            taskDueDate.setHours(0, 0, 0, 0);
+            carryoverTasks.push({
+                id: `carryover-${task.id}-${format(originalDate, 'yyyy-MM-dd')}`,
+                task_id: task.id,
+                title: task.title,
+                date: todayJST,
+                due_date: taskDueDate,
+                notification_time: task.notification_time || undefined,
+                completed: false,
+                is_recurring: !!task.recurrence_type,
+                is_carryover: true,
+                original_date: originalDate,
+                created_at: new Date(task.created_at),
+            });
         }
     }
 
-    return Array.from(overdueDatesSet)
-        .map(dateStr => parseISO(dateStr))
-        .sort((a, b) => a.getTime() - b.getTime());
+    // original_date の古い順にソートして上限50件で切り捨て
+    return carryoverTasks
+        .sort((a, b) => (a.original_date!.getTime()) - (b.original_date!.getTime()))
+        .slice(0, 50);
 }
 
 // タスクの完了状態を更新
@@ -484,6 +508,42 @@ function getRecurringOccurrenceDates(
                     checkDate = addDays(checkDate, customDays);
                     if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
                 }
+            } else if (customUnit === 'weeks') {
+                while (isBefore(checkDate, endDate)) {
+                    const diff = Math.floor((checkDate.getTime() - taskDueDate.getTime()) / 86400000);
+                    if (diff >= 0 && diff % (customDays * 7) === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
+                    checkDate = addDays(checkDate, customDays * 7);
+                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
+                }
+            } else if (customUnit === 'months') {
+                while (isBefore(checkDate, endDate)) {
+                    if (checkDate.getDate() === taskDueDate.getDate()) {
+                        const monthsDiff = (checkDate.getFullYear() - taskDueDate.getFullYear()) * 12 +
+                            (checkDate.getMonth() - taskDueDate.getMonth());
+                        if (monthsDiff >= 0 && monthsDiff % customDays === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
+                    }
+                    checkDate = addMonths(checkDate, customDays);
+                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
+                }
+            } else if (customUnit === 'months_end') {
+                while (isBefore(checkDate, endDate)) {
+                    if (isSameDay(checkDate, endOfMonth(checkDate))) {
+                        const monthsDiff = (checkDate.getFullYear() - taskDueDate.getFullYear()) * 12 +
+                            (checkDate.getMonth() - taskDueDate.getMonth());
+                        if (monthsDiff >= 0 && monthsDiff % customDays === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
+                    }
+                    checkDate = addMonths(checkDate, customDays);
+                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
+                }
+            } else if (customUnit === 'years') {
+                while (isBefore(checkDate, endDate)) {
+                    if (checkDate.getMonth() === taskDueDate.getMonth() && checkDate.getDate() === taskDueDate.getDate()) {
+                        const yearsDiff = checkDate.getFullYear() - taskDueDate.getFullYear();
+                        if (yearsDiff >= 0 && yearsDiff % customDays === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
+                    }
+                    checkDate = addYears(checkDate, customDays);
+                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
+                }
             }
             break;
     }
@@ -504,30 +564,49 @@ async function getTaskCompletionsBatch(
 
     if (taskIds.length === 0 || dateStrs.length === 0) return completionMap;
 
-    const { results } = await db
-        .prepare(
-            `SELECT * FROM task_completions WHERE task_id IN (${inPlaceholders(taskIds.length)}) AND completed_date IN (${inPlaceholders(dateStrs.length)})`
-        )
-        .bind(...taskIds, ...dateStrs)
-        .all<any>();
-
     const pairSet = new Set(taskIdDatePairs.map(p => `${p.taskId}_${format(p.date, 'yyyy-MM-dd')}`));
 
-    for (const row of results) {
-        const completedDateStr = typeof row.completed_date === 'string' &&
-            /^\d{4}-\d{2}-\d{2}$/.test(row.completed_date)
-            ? row.completed_date
-            : format(new Date(row.completed_date), 'yyyy-MM-dd');
-        const key = `${row.task_id}_${completedDateStr}`;
-        if (pairSet.has(key)) {
-            completionMap.set(key, {
-                id: row.id,
-                task_id: row.task_id,
-                completed_date: new Date(row.completed_date),
-                completed: row.completed === 1,
-                created_at: new Date(row.created_at),
-                updated_at: row.updated_at ? new Date(row.updated_at) : new Date(row.created_at),
-            });
+    const processRows = (results: any[]) => {
+        for (const row of results) {
+            const completedDateStr = typeof row.completed_date === 'string' &&
+                /^\d{4}-\d{2}-\d{2}$/.test(row.completed_date)
+                ? row.completed_date
+                : format(new Date(row.completed_date), 'yyyy-MM-dd');
+            const key = `${row.task_id}_${completedDateStr}`;
+            if (pairSet.has(key)) {
+                completionMap.set(key, {
+                    id: row.id,
+                    task_id: row.task_id,
+                    completed_date: new Date(row.completed_date),
+                    completed: row.completed === 1,
+                    created_at: new Date(row.created_at),
+                    updated_at: row.updated_at ? new Date(row.updated_at) : new Date(row.created_at),
+                });
+            }
+        }
+    };
+
+    // D1のバインドパラメータ上限(100)を超えないようにバッチ分割
+    // taskIds と dateStrs の両方をバッチ分割する
+    const BATCH_SIZE = 50;
+    const taskIdBatches: string[][] = [];
+    for (let i = 0; i < taskIds.length; i += BATCH_SIZE) {
+        taskIdBatches.push(taskIds.slice(i, i + BATCH_SIZE));
+    }
+    const dateBatches: string[][] = [];
+    for (let i = 0; i < dateStrs.length; i += BATCH_SIZE) {
+        dateBatches.push(dateStrs.slice(i, i + BATCH_SIZE));
+    }
+
+    for (const taskIdBatch of taskIdBatches) {
+        for (const dateBatch of dateBatches) {
+            const { results } = await db
+                .prepare(
+                    `SELECT * FROM task_completions WHERE task_id IN (${inPlaceholders(taskIdBatch.length)}) AND completed_date IN (${inPlaceholders(dateBatch.length)})`
+                )
+                .bind(...taskIdBatch, ...dateBatch)
+                .all<any>();
+            processRows(results);
         }
     }
 
@@ -541,20 +620,26 @@ async function getTaskExclusionsBatch(
 ): Promise<Map<string, Array<{ excluded_date: Date; exclusion_type: string }>>> {
     if (taskIds.length === 0) return new Map();
 
-    const { results } = await db
-        .prepare(
-            `SELECT task_id, excluded_date, exclusion_type FROM task_exclusions WHERE task_id IN (${inPlaceholders(taskIds.length)})`
-        )
-        .bind(...taskIds)
-        .all<any>();
-
     const exclusionsMap = new Map<string, Array<{ excluded_date: Date; exclusion_type: string }>>();
-    for (const row of results) {
-        if (!exclusionsMap.has(row.task_id)) exclusionsMap.set(row.task_id, []);
-        exclusionsMap.get(row.task_id)!.push({
-            excluded_date: new Date(row.excluded_date),
-            exclusion_type: row.exclusion_type,
-        });
+
+    // D1のバインドパラメータ上限(100)を超えないようにバッチ分割
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < taskIds.length; i += BATCH_SIZE) {
+        const batch = taskIds.slice(i, i + BATCH_SIZE);
+        const { results } = await db
+            .prepare(
+                `SELECT task_id, excluded_date, exclusion_type FROM task_exclusions WHERE task_id IN (${inPlaceholders(batch.length)})`
+            )
+            .bind(...batch)
+            .all<any>();
+
+        for (const row of results) {
+            if (!exclusionsMap.has(row.task_id)) exclusionsMap.set(row.task_id, []);
+            exclusionsMap.get(row.task_id)!.push({
+                excluded_date: new Date(row.excluded_date),
+                exclusion_type: row.exclusion_type,
+            });
+        }
     }
 
     return exclusionsMap;

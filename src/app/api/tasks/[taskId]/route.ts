@@ -30,6 +30,23 @@ export async function GET(
             .bind(taskId)
             .first<any>();
 
+        // 完了情報を取得（dateパラメータがある場合）
+        const dateParam = request.nextUrl.searchParams.get('date');
+        let completion = null;
+        if (dateParam) {
+            const completionRow = await db
+                .prepare('SELECT completed, completed_date, updated_at FROM task_completions WHERE task_id = ? AND completed_date = ? LIMIT 1')
+                .bind(taskId, dateParam)
+                .first<any>();
+            if (completionRow && completionRow.completed === 1) {
+                completion = {
+                    completed: true,
+                    completed_date: completionRow.completed_date,
+                    updated_at: completionRow.updated_at,
+                };
+            }
+        }
+
         return NextResponse.json({
             task: {
                 id: task.id,
@@ -46,6 +63,7 @@ export async function GET(
                       weekdays: recurrence.weekdays ? (() => { try { return JSON.parse(recurrence.weekdays); } catch { return null; } })() : null,
                   }
                 : null,
+            completion,
         });
     } catch (error) {
         console.error('Error fetching task:', error);

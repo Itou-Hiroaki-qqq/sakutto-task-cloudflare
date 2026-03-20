@@ -22,6 +22,7 @@ function parseTasksFromAPI(tasksRaw: any[]): DisplayTask[] {
         date: typeof task.date === 'string' ? parseISO(task.date) : new Date(task.date),
         due_date: typeof task.due_date === 'string' ? parseISO(task.due_date) : new Date(task.due_date),
         created_at: task.created_at ? (typeof task.created_at === 'string' ? parseISO(task.created_at) : new Date(task.created_at)) : undefined,
+        original_date: task.original_date ? (typeof task.original_date === 'string' ? parseISO(task.original_date) : new Date(task.original_date)) : undefined,
     }));
 }
 
@@ -42,7 +43,6 @@ function TopPageContent() {
     const [tasks, setTasks] = useState<DisplayTask[]>([]);
     const [memorials, setMemorials] = useState<Array<{ id: string; title: string }>>([]);
     const [memorialHolidays, setMemorialHolidays] = useState<MemorialHolidayInfo[]>([]);
-    const [overdueDates, setOverdueDates] = useState<Date[]>([]);
     const [userId, setUserId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [errorToast, setErrorToast] = useState<string | null>(null);
@@ -158,10 +158,6 @@ function TopPageContent() {
                         }
                     }
 
-                    const today = startOfDay(new Date());
-                    if (isSameDay(selectedDate, today) && data.overdueDates) {
-                        setOverdueDates(data.overdueDates.map((d: string) => parseISO(d)));
-                    }
                 }
 
                 if (memorialsRes.ok) {
@@ -297,15 +293,25 @@ function TopPageContent() {
 
         const dateStr = format(selectedDate, 'yyyy-MM-dd');
         const previousTasks = [...tasks];
+        // 引継ぎタスクの場合は original_date で完了を記録する
+        // task_id が重複する場合があるため（通常タスクと引継ぎタスクが同じ task_id）、
+        // 最初にマッチしたものを使う（チェックを入れたタスクに対応）
+        const targetTask = tasks.find(t => t.task_id === taskId && !t.completed === completed);
+        const actualTarget = targetTask || tasks.find(t => t.task_id === taskId);
+        const completionDateStr = actualTarget?.is_carryover && actualTarget?.original_date
+            ? format(actualTarget.original_date, 'yyyy-MM-dd')
+            : dateStr;
+        const targetUniqueId = actualTarget?.id;
 
         completionPendingRef.current = { taskId, completed };
-        setTasks(prev => prev.map(t => t.task_id === taskId ? { ...t, completed } : t));
+        // task.id（ユニークID）で更新して、同じ task_id の他タスクに影響しないようにする
+        setTasks(prev => prev.map(t => t.id === targetUniqueId ? { ...t, completed } : t));
 
         try {
             const res = await fetch('/api/tasks/completion', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ taskId, date: dateStr, completed }),
+                body: JSON.stringify({ taskId, date: completionDateStr, completed }),
             });
 
             if (!res.ok) {
@@ -314,7 +320,7 @@ function TopPageContent() {
             }
 
             if (isWithinCurrentMonthRange(selectedDate)) {
-                const updated = previousTasks.map(t => t.task_id === taskId ? { ...t, completed } : t);
+                const updated = previousTasks.map(t => t.id === targetUniqueId ? { ...t, completed } : t);
                 updateTasksCache(
                     userId,
                     { [dateStr]: updated },
@@ -389,7 +395,6 @@ function TopPageContent() {
                                 tasks={tasks}
                                 onToggleCompletion={handleToggleCompletion}
                                 memorials={memorials}
-                                overdueDates={overdueDates}
                             />
                         )}
                     </div>

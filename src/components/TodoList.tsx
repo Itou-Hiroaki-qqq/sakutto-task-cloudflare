@@ -11,19 +11,27 @@ interface TodoListProps {
     tasks: DisplayTask[];
     onToggleCompletion: (taskId: string, completed: boolean) => void;
     memorials?: Array<{ id: string; title: string }>;
-    overdueDates?: Date[];
 }
 
-export default function TodoList({ date, tasks, onToggleCompletion, memorials = [], overdueDates = [] }: TodoListProps) {
+export default function TodoList({ date, tasks, onToggleCompletion, memorials = [] }: TodoListProps) {
     const holiday = getHoliday(date);
     const dateStr = format(date, 'yyyy年M月d日(E)', { locale: ja });
 
+    // ソート: 未完了(通常) → 未完了(引継ぎ) → 完了(通常) → 完了(引継ぎ)
     const sortedTasks = tasks
         .map((task, index) => ({ task, index }))
         .sort((a, b) => {
+            // 1. 完了状態で分ける（未完了が先）
             if (a.task.completed !== b.task.completed) {
                 return a.task.completed ? 1 : -1;
             }
+            // 2. 同じ完了状態内で、引継ぎタスクは後ろ
+            const aCarryover = a.task.is_carryover ? 1 : 0;
+            const bCarryover = b.task.is_carryover ? 1 : 0;
+            if (aCarryover !== bCarryover) {
+                return aCarryover - bCarryover;
+            }
+            // 3. 元の順序を維持
             return a.index - b.index;
         })
         .map(({ task }) => task);
@@ -59,16 +67,6 @@ export default function TodoList({ date, tasks, onToggleCompletion, memorials = 
                     </div>
                 )}
             </div>
-
-            {overdueDates.length > 0 && (
-                <div className="mt-6 space-y-2">
-                    {overdueDates.map((overdueDate) => (
-                        <div key={format(overdueDate, 'yyyy-MM-dd')} className="alert alert-warning">
-                            <span>{format(overdueDate, 'M月d日', { locale: ja })}に未完了のタスクがあります</span>
-                        </div>
-                    ))}
-                </div>
-            )}
         </div>
     );
 }
@@ -84,8 +82,15 @@ function TodoItem({
         onToggleCompletion(task.task_id, e.target.checked);
     };
 
+    // 引継ぎタスクの場合は original_date を使ったURLでリンク先を設定する
+    const taskLinkHref = task.is_carryover
+        ? `/task?taskId=${task.task_id}&date=${format(task.original_date!, 'yyyy-MM-dd')}&carryover=true&returnUrl=${encodeURIComponent('/top')}`
+        : `/task?taskId=${task.task_id}&date=${format(task.date, 'yyyy-MM-dd')}&returnUrl=${encodeURIComponent('/top')}`;
+
     return (
-        <div className="flex items-center gap-3 p-3 bg-base-100 rounded-lg shadow hover:shadow-md transition-shadow">
+        <div className={`flex items-center gap-3 p-3 rounded-lg shadow hover:shadow-md transition-shadow ${
+            task.is_carryover ? 'bg-warning/10' : 'bg-base-100'
+        }`}>
             <input
                 type="checkbox"
                 className="checkbox checkbox-primary"
@@ -93,13 +98,16 @@ function TodoItem({
                 onChange={handleCheckboxChange}
             />
             <Link
-                href={`/task?taskId=${task.task_id}&date=${format(task.date, 'yyyy-MM-dd')}&returnUrl=${encodeURIComponent('/top')}`}
+                href={taskLinkHref}
                 className={`flex-1 cursor-pointer ${task.completed
                     ? 'line-through text-base-content/50'
                     : 'text-base-content'
                     }`}
             >
                 <div className="flex items-center gap-2">
+                    {task.is_carryover && (
+                        <span className="material-icons text-warning text-sm">warning</span>
+                    )}
                     {task.notification_time && (
                         <span className="badge badge-outline badge-sm">
                             {task.notification_time}
