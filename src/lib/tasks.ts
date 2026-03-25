@@ -69,6 +69,10 @@ export async function getTasksForDate(
 
     const completionsMap = await getTaskCompletionsBatch(db, completionPairs);
 
+    // 3.5. この日付から引継ぎ完了されたタスクを特定（元の日付から除外するため）
+    const targetTaskIds = completionPairs.map(p => p.taskId);
+    const carryoverAwaySet = await getCarryoverAwayTaskIds(db, targetTaskIds, dateStr);
+
     // 4. 表示用タスクリストを作成
     for (const task of tasks) {
         const taskDueDate = new Date(task.due_date);
@@ -77,6 +81,8 @@ export async function getTasksForDate(
 
         if (!task.recurrence_type) {
             if (isSameDay(taskDueDate, targetDate)) {
+                // 引継ぎ完了で別の日に移動済みなら除外
+                if (carryoverAwaySet.has(task.id)) continue;
                 const completion = completionsMap.get(`${task.id}_${dateStr}`);
                 displayTasks.push({
                     id: `single-${task.id}`,
@@ -96,6 +102,8 @@ export async function getTasksForDate(
                 task.id, task.recurrence_type, taskDueDate, targetDate,
                 task.custom_days, task.custom_unit, weekdays, exclusions
             )) {
+                // 引継ぎ完了で別の日に移動済みなら除外
+                if (carryoverAwaySet.has(`${task.id}_${dateStr}`)) continue;
                 const completion = completionsMap.get(`${task.id}_${dateStr}`);
                 displayTasks.push({
                     id: `recurring-${task.id}-${dateStr}`,
@@ -292,32 +300,43 @@ export async function getCarryoverTasks(userId: string, todayJST: Date): Promise
         }
     }
 
-    // 完了状態を一括取得
+    // 完了状態を一括取得（元の日付ベース）
     const completionPairs = carryoverPairs.map(p => ({ taskId: p.task.id, date: p.originalDate }));
     const completionsMap = await getTaskCompletionsBatch(db, completionPairs);
 
-    // 未完了のもののみ DisplayTask に変換
+    // 今日の日付で carryover_from_date 付きの完了レコードを一括取得
+    const todayStr = format(todayJST, 'yyyy-MM-dd');
+    const carryoverCompletionsMap = await getCarryoverCompletionsBatch(db, carryoverPairs.map(p => p.task.id), todayStr);
+
+    // 未完了 + 今日完了した引継ぎタスクを DisplayTask に変換
     const carryoverTasks: DisplayTask[] = [];
     for (const { task, originalDate } of carryoverPairs) {
-        const key = `${task.id}_${format(originalDate, 'yyyy-MM-dd')}`;
-        const completion = completionsMap.get(key);
-        if (!completion?.completed) {
-            const taskDueDate = new Date(task.due_date);
-            taskDueDate.setHours(0, 0, 0, 0);
-            carryoverTasks.push({
-                id: `carryover-${task.id}-${format(originalDate, 'yyyy-MM-dd')}`,
-                task_id: task.id,
-                title: task.title,
-                date: todayJST,
-                due_date: taskDueDate,
-                notification_time: task.notification_time || undefined,
-                completed: false,
-                is_recurring: !!task.recurrence_type,
-                is_carryover: true,
-                original_date: originalDate,
-                created_at: new Date(task.created_at),
-            });
-        }
+        const originalDateStr = format(originalDate, 'yyyy-MM-dd');
+        const key = `${task.id}_${originalDateStr}`;
+        const completionOnOriginal = completionsMap.get(key);
+
+        // 元の日付で完了済み（通常完了）→ 引継ぎ対象外
+        if (completionOnOriginal?.completed) continue;
+
+        // 今日のcarryover完了をチェック
+        const carryoverCompletion = carryoverCompletionsMap.get(`${task.id}_${originalDateStr}`);
+        const isCompletedAsCarryover = !!carryoverCompletion?.completed;
+
+        const taskDueDate = new Date(task.due_date);
+        taskDueDate.setHours(0, 0, 0, 0);
+        carryoverTasks.push({
+            id: `carryover-${task.id}-${originalDateStr}`,
+            task_id: task.id,
+            title: task.title,
+            date: todayJST,
+            due_date: taskDueDate,
+            notification_time: task.notification_time || undefined,
+            completed: isCompletedAsCarryover,
+            is_recurring: !!task.recurrence_type,
+            is_carryover: true,
+            original_date: originalDate,
+            created_at: new Date(task.created_at),
+        });
     }
 
     // original_date の古い順にソートして上限50件で切り捨て
@@ -327,14 +346,24 @@ export async function getCarryoverTasks(userId: string, todayJST: Date): Promise
 }
 
 // タスクの完了状態を更新
+// carryoverFromDate: 引継ぎタスクの場合、元の日付を指定（completedDateは今日、carryoverFromDateは元の日付）
 export async function toggleTaskCompletion(
     taskId: string,
     date: Date,
-    completed: boolean
+    completed: boolean,
+    carryoverFromDate?: string
 ): Promise<void> {
     const db = await getDB();
     const dateStr = format(date, 'yyyy-MM-dd');
     const now = new Date().toISOString();
+
+    // 引継ぎタスクの場合、元の日付の完了レコードがあれば削除（二重記録防止）
+    if (carryoverFromDate && carryoverFromDate !== dateStr) {
+        await db
+            .prepare('DELETE FROM task_completions WHERE task_id = ? AND completed_date = ?')
+            .bind(taskId, carryoverFromDate)
+            .run();
+    }
 
     const existing = await db
         .prepare('SELECT id FROM task_completions WHERE task_id = ? AND completed_date = ? LIMIT 1')
@@ -343,14 +372,14 @@ export async function toggleTaskCompletion(
 
     if (existing) {
         await db
-            .prepare('UPDATE task_completions SET completed = ?, updated_at = ? WHERE task_id = ? AND completed_date = ?')
-            .bind(completed ? 1 : 0, now, taskId, dateStr)
+            .prepare('UPDATE task_completions SET completed = ?, carryover_from_date = ?, updated_at = ? WHERE task_id = ? AND completed_date = ?')
+            .bind(completed ? 1 : 0, carryoverFromDate || null, now, taskId, dateStr)
             .run();
     } else {
         const id = crypto.randomUUID();
         await db
-            .prepare('INSERT INTO task_completions (id, task_id, completed_date, completed) VALUES (?, ?, ?, ?)')
-            .bind(id, taskId, dateStr, completed ? 1 : 0)
+            .prepare('INSERT INTO task_completions (id, task_id, completed_date, completed, carryover_from_date) VALUES (?, ?, ?, ?, ?)')
+            .bind(id, taskId, dateStr, completed ? 1 : 0, carryoverFromDate || null)
             .run();
     }
 }
@@ -643,6 +672,79 @@ async function getTaskExclusionsBatch(
     }
 
     return exclusionsMap;
+}
+
+// 指定日付から引継ぎ完了で移動されたタスクIDを取得
+// （carryover_from_date = targetDateStr のレコードがあるタスク → 元の日付から消す）
+async function getCarryoverAwayTaskIds(
+    db: D1Database,
+    taskIds: string[],
+    targetDateStr: string
+): Promise<Set<string>> {
+    const resultSet = new Set<string>();
+    if (taskIds.length === 0) return resultSet;
+
+    const uniqueTaskIds = [...new Set(taskIds)];
+    const BATCH_SIZE = 50;
+
+    for (let i = 0; i < uniqueTaskIds.length; i += BATCH_SIZE) {
+        const batch = uniqueTaskIds.slice(i, i + BATCH_SIZE);
+        const { results } = await db
+            .prepare(
+                `SELECT task_id FROM task_completions
+                 WHERE task_id IN (${inPlaceholders(batch.length)})
+                 AND carryover_from_date = ?
+                 AND completed = 1`
+            )
+            .bind(...batch, targetDateStr)
+            .all<any>();
+
+        for (const row of results) {
+            // 単発タスク用: task_id のみ
+            resultSet.add(row.task_id);
+            // 繰り返しタスク用: task_id + 元の日付
+            resultSet.add(`${row.task_id}_${targetDateStr}`);
+        }
+    }
+
+    return resultSet;
+}
+
+// 今日の日付でcarryover_from_date付きの完了レコードを一括取得
+async function getCarryoverCompletionsBatch(
+    db: D1Database,
+    taskIds: string[],
+    todayStr: string
+): Promise<Map<string, { completed: boolean; completed_date: string }>> {
+    const resultMap = new Map<string, { completed: boolean; completed_date: string }>();
+    if (taskIds.length === 0) return resultMap;
+
+    const uniqueTaskIds = [...new Set(taskIds)];
+    const BATCH_SIZE = 50;
+
+    for (let i = 0; i < uniqueTaskIds.length; i += BATCH_SIZE) {
+        const batch = uniqueTaskIds.slice(i, i + BATCH_SIZE);
+        const { results } = await db
+            .prepare(
+                `SELECT task_id, completed, completed_date, carryover_from_date FROM task_completions
+                 WHERE task_id IN (${inPlaceholders(batch.length)})
+                 AND completed_date = ?
+                 AND carryover_from_date IS NOT NULL`
+            )
+            .bind(...batch, todayStr)
+            .all<any>();
+
+        for (const row of results) {
+            // キーは task_id + carryover_from_date（元の日付）
+            const key = `${row.task_id}_${row.carryover_from_date}`;
+            resultMap.set(key, {
+                completed: row.completed === 1,
+                completed_date: row.completed_date,
+            });
+        }
+    }
+
+    return resultMap;
 }
 
 // ソート関数

@@ -48,7 +48,7 @@ function TaskEditPageContent() {
 
         const run = async () => {
             const taskFetchUrl = taskIdParam
-                ? `/api/tasks/${taskIdParam}${dateParam ? `?date=${dateParam}` : ''}`
+                ? `/api/tasks/${taskIdParam}${dateParam ? `?date=${dateParam}` : ''}${isCarryover ? `${dateParam ? '&' : '?'}carryover=true` : ''}`
                 : null;
             const [meResponse, taskResponse] = await Promise.all([
                 fetch('/api/auth/me'),
@@ -135,7 +135,7 @@ function TaskEditPageContent() {
                     }
                     // 引継ぎタスクの完了情報を取得
                     if (isCarryover && data.completion?.completed) {
-                        setCompletionDate(data.completion.updated_at || data.completion.completed_date);
+                        setCompletionDate(data.completion.completed_date);
                     }
                 } else {
                     const errorData = await taskResponse.json() as any;

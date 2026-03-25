@@ -293,15 +293,19 @@ function TopPageContent() {
 
         const dateStr = format(selectedDate, 'yyyy-MM-dd');
         const previousTasks = [...tasks];
-        // 引継ぎタスクの場合は original_date で完了を記録する
         // task_id が重複する場合があるため（通常タスクと引継ぎタスクが同じ task_id）、
         // 最初にマッチしたものを使う（チェックを入れたタスクに対応）
         const targetTask = tasks.find(t => t.task_id === taskId && !t.completed === completed);
         const actualTarget = targetTask || tasks.find(t => t.task_id === taskId);
-        const completionDateStr = actualTarget?.is_carryover && actualTarget?.original_date
-            ? format(actualTarget.original_date, 'yyyy-MM-dd')
-            : dateStr;
         const targetUniqueId = actualTarget?.id;
+
+        // 引継ぎタスクの場合: date=今日, carryoverFromDate=元の日付
+        // 通常タスクの場合: date=選択日
+        const isCarryoverTask = actualTarget?.is_carryover && actualTarget?.original_date;
+        const completionDateStr = dateStr; // 常に今日（選択日）で記録
+        const carryoverFromDate = isCarryoverTask
+            ? format(actualTarget!.original_date!, 'yyyy-MM-dd')
+            : undefined;
 
         completionPendingRef.current = { taskId, completed };
         // task.id（ユニークID）で更新して、同じ task_id の他タスクに影響しないようにする
@@ -311,7 +315,7 @@ function TopPageContent() {
             const res = await fetch('/api/tasks/completion', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ taskId, date: completionDateStr, completed }),
+                body: JSON.stringify({ taskId, date: completionDateStr, completed, carryoverFromDate }),
             });
 
             if (!res.ok) {

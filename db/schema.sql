@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS task_completions (
     task_id TEXT NOT NULL,
     completed_date TEXT NOT NULL,
     completed INTEGER DEFAULT 0,
+    carryover_from_date TEXT,  -- 引継ぎタスクの元の日付（NULLなら通常完了）
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,

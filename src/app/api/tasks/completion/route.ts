@@ -10,13 +10,13 @@ export async function POST(request: NextRequest) {
         }
 
         const body = await request.json() as any;
-        const { taskId, date, completed } = body;
+        const { taskId, date, completed, carryoverFromDate } = body;
 
         if (!taskId || !date || typeof completed !== 'boolean') {
             return NextResponse.json({ error: 'Invalid parameters' }, { status: 400 });
         }
 
-        await toggleTaskCompletion(taskId, new Date(date), completed);
+        await toggleTaskCompletion(taskId, new Date(date), completed, carryoverFromDate || undefined);
 
         return NextResponse.json({ success: true });
     } catch (error) {

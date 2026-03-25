@@ -32,16 +32,28 @@ export async function GET(
 
         // 完了情報を取得（dateパラメータがある場合）
         const dateParam = request.nextUrl.searchParams.get('date');
+        const carryoverParam = request.nextUrl.searchParams.get('carryover');
         let completion = null;
         if (dateParam) {
-            const completionRow = await db
-                .prepare('SELECT completed, completed_date, updated_at FROM task_completions WHERE task_id = ? AND completed_date = ? LIMIT 1')
+            // まず通常の完了レコードを検索
+            let completionRow = await db
+                .prepare('SELECT completed, completed_date, carryover_from_date, updated_at FROM task_completions WHERE task_id = ? AND completed_date = ? LIMIT 1')
                 .bind(taskId, dateParam)
                 .first<any>();
+
+            // 引継ぎタスクの場合、carryover_from_date で完了レコードを検索
+            if (!completionRow && carryoverParam === 'true') {
+                completionRow = await db
+                    .prepare('SELECT completed, completed_date, carryover_from_date, updated_at FROM task_completions WHERE task_id = ? AND carryover_from_date = ? AND completed = 1 LIMIT 1')
+                    .bind(taskId, dateParam)
+                    .first<any>();
+            }
+
             if (completionRow && completionRow.completed === 1) {
                 completion = {
                     completed: true,
                     completed_date: completionRow.completed_date,
+                    carryover_from_date: completionRow.carryover_from_date || null,
                     updated_at: completionRow.updated_at,
                 };
             }
