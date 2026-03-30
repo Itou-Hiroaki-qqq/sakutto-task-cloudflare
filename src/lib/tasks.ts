@@ -1,8 +1,8 @@
 import { getDB } from './db';
 import { TaskCompletion, DisplayTask } from '@/types/database';
 import {
-    format, isSameDay, addDays, addMonths, addYears, getDay,
-    endOfMonth, isBefore, startOfDay, parseISO,
+    format, isSameDay, addDays, getDay,
+    endOfMonth, isBefore, startOfDay,
 } from 'date-fns';
 import { extractTimeInMinutes, hasTimeInTitle } from './timeUtils';
 
@@ -268,33 +268,21 @@ export async function getCarryoverTasks(userId: string, todayJST: Date): Promise
                 carryoverPairs.push({ task, originalDate: taskDueDate });
             }
         } else {
-            // 繰り返しタスク: thirtyDaysAgo から todayStart の間の出現日を取得
+            // 繰り返しタスク: 30日間ウィンドウ内の各日を直接チェック（高速化）
             if (isBefore(taskDueDate, todayStart)) {
                 const exclusions = exclusionsMap.get(task.id) || null;
-
-                // 'after' 除外が taskDueDate より前にある場合はスキップ
-                let excludeAfterDate: Date | null = null;
-                if (exclusions) {
-                    for (const ex of exclusions) {
-                        if (ex.exclusion_type === 'after' && ex.excluded_date < todayStart) {
-                            excludeAfterDate = ex.excluded_date;
-                            break;
-                        }
-                    }
-                }
-                if (excludeAfterDate && isBefore(excludeAfterDate, taskDueDate)) continue;
-
                 const weekdays = parseWeekdays(task.recurrence_weekdays);
-                // taskDueDate を起点に todayStart(exclusive)までの出現日を計算し、thirtyDaysAgo 以降のものだけ採用
-                const occurrenceDates = getRecurringOccurrenceDates(
-                    task.recurrence_type, taskDueDate, todayStart,
-                    task.custom_days, task.custom_unit, weekdays, exclusions
-                );
-                for (const occurrenceDate of occurrenceDates) {
-                    // 30日以内の出現日のみ
-                    if (!isBefore(occurrenceDate, thirtyDaysAgo)) {
-                        carryoverPairs.push({ task, originalDate: occurrenceDate });
+
+                // thirtyDaysAgo から todayStart(exclusive) までの各日をチェック
+                let checkDate = new Date(thirtyDaysAgo);
+                while (isBefore(checkDate, todayStart)) {
+                    if (shouldIncludeRecurringTaskWithExclusions(
+                        task.id, task.recurrence_type, taskDueDate, checkDate,
+                        task.custom_days, task.custom_unit, weekdays, exclusions
+                    )) {
+                        carryoverPairs.push({ task, originalDate: new Date(checkDate) });
                     }
+                    checkDate = addDays(checkDate, 1);
                 }
             }
         }
@@ -304,9 +292,8 @@ export async function getCarryoverTasks(userId: string, todayJST: Date): Promise
     const completionPairs = carryoverPairs.map(p => ({ taskId: p.task.id, date: p.originalDate }));
     const completionsMap = await getTaskCompletionsBatch(db, completionPairs);
 
-    // 今日の日付で carryover_from_date 付きの完了レコードを一括取得
-    const todayStr = format(todayJST, 'yyyy-MM-dd');
-    const carryoverCompletionsMap = await getCarryoverCompletionsBatch(db, carryoverPairs.map(p => p.task.id), todayStr);
+    // carryover_from_date 付きの完了レコードを一括取得（完了日を問わず検索）
+    const carryoverCompletionsMap = await getCarryoverCompletionsBatch(db, carryoverPairs.map(p => p.task.id));
 
     // 未完了 + 今日完了した引継ぎタスクを DisplayTask に変換
     const carryoverTasks: DisplayTask[] = [];
@@ -357,10 +344,15 @@ export async function toggleTaskCompletion(
     const dateStr = format(date, 'yyyy-MM-dd');
     const now = new Date().toISOString();
 
-    // 引継ぎタスクの場合、元の日付の完了レコードがあれば削除（二重記録防止）
+    // 引継ぎタスクの場合、元の日付の完了レコードと過去のcarryoverレコードを削除（重複防止）
     if (carryoverFromDate && carryoverFromDate !== dateStr) {
         await db
             .prepare('DELETE FROM task_completions WHERE task_id = ? AND completed_date = ?')
+            .bind(taskId, carryoverFromDate)
+            .run();
+        // 同じ元日付の古いcarryoverレコードも削除（日を跨いだ再完了で蓄積しないように）
+        await db
+            .prepare('DELETE FROM task_completions WHERE task_id = ? AND carryover_from_date = ?')
             .bind(taskId, carryoverFromDate)
             .run();
     }
@@ -448,136 +440,6 @@ export function shouldIncludeRecurringTaskWithExclusions(
             return false;
         default: return false;
     }
-}
-
-// 繰り返しタスクの出現日を計算
-function getRecurringOccurrenceDates(
-    recurrenceType: string,
-    taskDueDate: Date,
-    endDate: Date,
-    customDays: number | null,
-    customUnit: string | null,
-    weekdays: number[] | null,
-    exclusions: Array<{ excluded_date: Date; exclusion_type: string }> | null
-): Date[] {
-    const occurrences: Date[] = [];
-    let checkDate = new Date(taskDueDate);
-    const maxDays = 365;
-
-    const isExcluded = (date: Date): boolean => {
-        if (!exclusions) return false;
-        for (const ex of exclusions) {
-            if (ex.exclusion_type === 'single' && isSameDay(ex.excluded_date, date)) return true;
-            if (ex.exclusion_type === 'after' && date >= ex.excluded_date) return true;
-        }
-        return false;
-    };
-
-    switch (recurrenceType) {
-        case 'daily':
-            while (isBefore(checkDate, endDate)) {
-                if (!isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                checkDate = addDays(checkDate, 1);
-                if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-            }
-            break;
-        case 'weekly': {
-            const targetWeekday = getDay(taskDueDate);
-            while (isBefore(checkDate, endDate)) {
-                if (getDay(checkDate) === targetWeekday && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                const daysUntil = (targetWeekday - getDay(checkDate) + 7) % 7 || 7;
-                checkDate = addDays(checkDate, daysUntil);
-                if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-            }
-            break;
-        }
-        case 'monthly': {
-            const targetDay = taskDueDate.getDate();
-            while (isBefore(checkDate, endDate)) {
-                if (checkDate.getDate() === targetDay && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                checkDate = addMonths(checkDate, 1);
-                if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-            }
-            break;
-        }
-        case 'monthly_end':
-            while (isBefore(checkDate, endDate)) {
-                if (isSameDay(checkDate, endOfMonth(checkDate)) && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                checkDate = addMonths(checkDate, 1);
-                if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-            }
-            break;
-        case 'yearly': {
-            const targetMonth = taskDueDate.getMonth();
-            const targetDate = taskDueDate.getDate();
-            while (isBefore(checkDate, endDate)) {
-                if (checkDate.getMonth() === targetMonth && checkDate.getDate() === targetDate && !isExcluded(checkDate))
-                    occurrences.push(new Date(checkDate));
-                checkDate = addYears(checkDate, 1);
-                if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-            }
-            break;
-        }
-        case 'weekdays':
-            if (weekdays && weekdays.length > 0) {
-                const weekdaySet = new Set(weekdays);
-                while (isBefore(checkDate, endDate)) {
-                    if (weekdaySet.has(getDay(checkDate)) && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                    checkDate = addDays(checkDate, 1);
-                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-                }
-            }
-            break;
-        case 'custom':
-            if (!customDays || customDays <= 0) break;
-            if (!customUnit || customUnit === 'days') {
-                while (isBefore(checkDate, endDate)) {
-                    const diff = Math.floor((checkDate.getTime() - taskDueDate.getTime()) / 86400000);
-                    if (diff >= 0 && diff % customDays === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                    checkDate = addDays(checkDate, customDays);
-                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-                }
-            } else if (customUnit === 'weeks') {
-                while (isBefore(checkDate, endDate)) {
-                    const diff = Math.floor((checkDate.getTime() - taskDueDate.getTime()) / 86400000);
-                    if (diff >= 0 && diff % (customDays * 7) === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                    checkDate = addDays(checkDate, customDays * 7);
-                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-                }
-            } else if (customUnit === 'months') {
-                while (isBefore(checkDate, endDate)) {
-                    if (checkDate.getDate() === taskDueDate.getDate()) {
-                        const monthsDiff = (checkDate.getFullYear() - taskDueDate.getFullYear()) * 12 +
-                            (checkDate.getMonth() - taskDueDate.getMonth());
-                        if (monthsDiff >= 0 && monthsDiff % customDays === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                    }
-                    checkDate = addMonths(checkDate, customDays);
-                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-                }
-            } else if (customUnit === 'months_end') {
-                while (isBefore(checkDate, endDate)) {
-                    if (isSameDay(checkDate, endOfMonth(checkDate))) {
-                        const monthsDiff = (checkDate.getFullYear() - taskDueDate.getFullYear()) * 12 +
-                            (checkDate.getMonth() - taskDueDate.getMonth());
-                        if (monthsDiff >= 0 && monthsDiff % customDays === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                    }
-                    checkDate = addMonths(checkDate, customDays);
-                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-                }
-            } else if (customUnit === 'years') {
-                while (isBefore(checkDate, endDate)) {
-                    if (checkDate.getMonth() === taskDueDate.getMonth() && checkDate.getDate() === taskDueDate.getDate()) {
-                        const yearsDiff = checkDate.getFullYear() - taskDueDate.getFullYear();
-                        if (yearsDiff >= 0 && yearsDiff % customDays === 0 && !isExcluded(checkDate)) occurrences.push(new Date(checkDate));
-                    }
-                    checkDate = addYears(checkDate, customDays);
-                    if (Math.abs((checkDate.getTime() - taskDueDate.getTime()) / 86400000) > maxDays) break;
-                }
-            }
-            break;
-    }
-
-    return occurrences;
 }
 
 // 複数の完了状態を一括取得（D1対応）
@@ -710,11 +572,10 @@ async function getCarryoverAwayTaskIds(
     return resultSet;
 }
 
-// 今日の日付でcarryover_from_date付きの完了レコードを一括取得
+// carryover_from_date付きの完了レコードを一括取得（日付を問わず検索）
 async function getCarryoverCompletionsBatch(
     db: D1Database,
-    taskIds: string[],
-    todayStr: string
+    taskIds: string[]
 ): Promise<Map<string, { completed: boolean; completed_date: string }>> {
     const resultMap = new Map<string, { completed: boolean; completed_date: string }>();
     if (taskIds.length === 0) return resultMap;
@@ -728,10 +589,9 @@ async function getCarryoverCompletionsBatch(
             .prepare(
                 `SELECT task_id, completed, completed_date, carryover_from_date FROM task_completions
                  WHERE task_id IN (${inPlaceholders(batch.length)})
-                 AND completed_date = ?
                  AND carryover_from_date IS NOT NULL`
             )
-            .bind(...batch, todayStr)
+            .bind(...batch)
             .all<any>();
 
         for (const row of results) {
