@@ -115,8 +115,10 @@ export async function DELETE(
 
         if (!recurrence) {
             // 単発タスクを完全に削除
-            await db.prepare('DELETE FROM task_completions WHERE task_id = ?').bind(taskId).run();
-            await db.prepare('DELETE FROM tasks WHERE id = ? AND user_id = ?').bind(taskId, payload.uid).run();
+            await db.batch([
+                db.prepare('DELETE FROM task_completions WHERE task_id = ?').bind(taskId),
+                db.prepare('DELETE FROM tasks WHERE id = ? AND user_id = ?').bind(taskId, payload.uid),
+            ]);
             return NextResponse.json({ success: true, message: 'タスクを削除しました' });
         }
 
@@ -125,29 +127,23 @@ export async function DELETE(
         }
 
         if (deleteOption === 'this_only') {
-            await db
-                .prepare('DELETE FROM task_exclusions WHERE task_id = ? AND excluded_date = ? AND exclusion_type = ?')
-                .bind(taskId, targetDate, 'single')
-                .run();
-
             const exId = crypto.randomUUID();
-            await db
-                .prepare('INSERT OR IGNORE INTO task_exclusions (id, task_id, excluded_date, exclusion_type) VALUES (?, ?, ?, ?)')
-                .bind(exId, taskId, targetDate, 'single')
-                .run();
+            await db.batch([
+                db.prepare('DELETE FROM task_exclusions WHERE task_id = ? AND excluded_date = ? AND exclusion_type = ?')
+                    .bind(taskId, targetDate, 'single'),
+                db.prepare('INSERT OR IGNORE INTO task_exclusions (id, task_id, excluded_date, exclusion_type) VALUES (?, ?, ?, ?)')
+                    .bind(exId, taskId, targetDate, 'single'),
+            ]);
 
             return NextResponse.json({ success: true, message: 'このタスクを削除しました' });
         } else if (deleteOption === 'future_all') {
-            await db
-                .prepare('DELETE FROM task_exclusions WHERE task_id = ? AND exclusion_type = ?')
-                .bind(taskId, 'after')
-                .run();
-
             const exId = crypto.randomUUID();
-            await db
-                .prepare('INSERT OR IGNORE INTO task_exclusions (id, task_id, excluded_date, exclusion_type) VALUES (?, ?, ?, ?)')
-                .bind(exId, taskId, targetDate, 'after')
-                .run();
+            await db.batch([
+                db.prepare('DELETE FROM task_exclusions WHERE task_id = ? AND exclusion_type = ?')
+                    .bind(taskId, 'after'),
+                db.prepare('INSERT OR IGNORE INTO task_exclusions (id, task_id, excluded_date, exclusion_type) VALUES (?, ?, ?, ?)')
+                    .bind(exId, taskId, targetDate, 'after'),
+            ]);
 
             return NextResponse.json({ success: true, message: 'これ以降の繰り返しタスクをすべて削除しました' });
         } else {

@@ -5,6 +5,7 @@ import {
     getTasksBasicForDate,
     updateTasksWithCompletionStatus,
     getCarryoverTasks,
+    getCarryoverCompletedTasksForDate,
 } from '@/lib/tasks';
 import { getTodayJST } from '@/lib/timezone';
 import { getDB } from '@/lib/db';
@@ -34,14 +35,26 @@ export async function GET(request: NextRequest) {
             tasks = await getTasksForDate(payload.uid, date);
         }
 
-        // 今日（JST）のリクエスト時のみ、過去の未完了タスクを引継ぎタスクとしてマージ
-        const todayJST = getTodayJST();
-        if (!basic && isSameDay(date, todayJST)) {
-            try {
-                const carryoverTasks = await getCarryoverTasks(payload.uid, todayJST);
-                tasks = [...tasks, ...carryoverTasks];
-            } catch (carryoverError) {
-                console.error('Error fetching carryover tasks (non-fatal):', carryoverError);
+        if (!basic) {
+            const todayJST = getTodayJST();
+            if (isSameDay(date, todayJST)) {
+                // 今日: 未完了の引継ぎタスク + 今日完了した引継ぎタスクをマージ
+                try {
+                    const carryoverTasks = await getCarryoverTasks(payload.uid, todayJST);
+                    tasks = [...tasks, ...carryoverTasks];
+                } catch (carryoverError) {
+                    console.error('Error fetching carryover tasks (non-fatal):', carryoverError);
+                }
+            } else {
+                // 過去の日付: その日に完了された引継ぎタスクをマージ
+                try {
+                    const carryoverCompleted = await getCarryoverCompletedTasksForDate(payload.uid, date);
+                    if (carryoverCompleted.length > 0) {
+                        tasks = [...tasks, ...carryoverCompleted];
+                    }
+                } catch (carryoverError) {
+                    console.error('Error fetching carryover completed tasks (non-fatal):', carryoverError);
+                }
             }
         }
 
@@ -98,18 +111,20 @@ export async function POST(request: NextRequest) {
         const taskId = crypto.randomUUID();
         const now = new Date().toISOString();
 
-        await db
-            .prepare('INSERT INTO tasks (id, user_id, title, due_date, notification_enabled, notification_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-            .bind(taskId, payload.uid, title, dueDate, notificationEnabled ? 1 : 0, notificationTime || null, now, now)
-            .run();
+        const statements: D1PreparedStatement[] = [
+            db.prepare('INSERT INTO tasks (id, user_id, title, due_date, notification_enabled, notification_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                .bind(taskId, payload.uid, title, dueDate, notificationEnabled ? 1 : 0, notificationTime || null, now, now),
+        ];
 
         if (recurrenceType) {
             const recId = crypto.randomUUID();
-            await db
-                .prepare('INSERT INTO task_recurrences (id, task_id, type, custom_days, custom_unit, weekdays) VALUES (?, ?, ?, ?, ?, ?)')
-                .bind(recId, taskId, recurrenceType, customDays || null, customUnit || null, selectedWeekdays ? JSON.stringify(selectedWeekdays) : null)
-                .run();
+            statements.push(
+                db.prepare('INSERT INTO task_recurrences (id, task_id, type, custom_days, custom_unit, weekdays) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(recId, taskId, recurrenceType, customDays || null, customUnit || null, selectedWeekdays ? JSON.stringify(selectedWeekdays) : null)
+            );
         }
+
+        await db.batch(statements);
 
         return NextResponse.json({ success: true, taskId });
     } catch (error) {
@@ -141,41 +156,36 @@ export async function PUT(request: NextRequest) {
 
         if (updateScope === 'this_only' && targetDate) {
             // 「この予定のみ変更」: 除外日を追加して新しい単発タスクを作成
-            await db
-                .prepare('DELETE FROM task_exclusions WHERE task_id = ? AND excluded_date = ? AND exclusion_type = ?')
-                .bind(taskId, targetDate, 'single')
-                .run();
-
             const exId = crypto.randomUUID();
-            await db
-                .prepare('INSERT OR IGNORE INTO task_exclusions (id, task_id, excluded_date, exclusion_type) VALUES (?, ?, ?, ?)')
-                .bind(exId, taskId, targetDate, 'single')
-                .run();
-
             const newTaskId = crypto.randomUUID();
-            await db
-                .prepare('INSERT INTO tasks (id, user_id, title, due_date, notification_enabled, notification_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-                .bind(newTaskId, payload.uid, title, dueDate, notificationEnabled ? 1 : 0, notificationTime || null, now, now)
-                .run();
+            await db.batch([
+                db.prepare('DELETE FROM task_exclusions WHERE task_id = ? AND excluded_date = ? AND exclusion_type = ?')
+                    .bind(taskId, targetDate, 'single'),
+                db.prepare('INSERT OR IGNORE INTO task_exclusions (id, task_id, excluded_date, exclusion_type) VALUES (?, ?, ?, ?)')
+                    .bind(exId, taskId, targetDate, 'single'),
+                db.prepare('INSERT INTO tasks (id, user_id, title, due_date, notification_enabled, notification_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                    .bind(newTaskId, payload.uid, title, dueDate, notificationEnabled ? 1 : 0, notificationTime || null, now, now),
+            ]);
 
             return NextResponse.json({ success: true });
         }
 
         // 通常の更新（単発 or 以降すべて）
-        await db
-            .prepare('UPDATE tasks SET title = ?, due_date = ?, notification_enabled = ?, notification_time = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-            .bind(title, dueDate, notificationEnabled ? 1 : 0, notificationTime || null, now, taskId, payload.uid)
-            .run();
-
-        await db.prepare('DELETE FROM task_recurrences WHERE task_id = ?').bind(taskId).run();
+        const updateStatements: D1PreparedStatement[] = [
+            db.prepare('UPDATE tasks SET title = ?, due_date = ?, notification_enabled = ?, notification_time = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                .bind(title, dueDate, notificationEnabled ? 1 : 0, notificationTime || null, now, taskId, payload.uid),
+            db.prepare('DELETE FROM task_recurrences WHERE task_id = ?').bind(taskId),
+        ];
 
         if (recurrenceType) {
             const recId = crypto.randomUUID();
-            await db
-                .prepare('INSERT INTO task_recurrences (id, task_id, type, custom_days, custom_unit, weekdays) VALUES (?, ?, ?, ?, ?, ?)')
-                .bind(recId, taskId, recurrenceType, customDays || null, customUnit || null, selectedWeekdays ? JSON.stringify(selectedWeekdays) : null)
-                .run();
+            updateStatements.push(
+                db.prepare('INSERT INTO task_recurrences (id, task_id, type, custom_days, custom_unit, weekdays) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(recId, taskId, recurrenceType, customDays || null, customUnit || null, selectedWeekdays ? JSON.stringify(selectedWeekdays) : null)
+            );
         }
+
+        await db.batch(updateStatements);
 
         return NextResponse.json({ success: true });
     } catch (error) {
