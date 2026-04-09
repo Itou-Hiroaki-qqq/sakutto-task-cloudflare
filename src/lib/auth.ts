@@ -24,14 +24,25 @@ function fromBase64url(str: string): Uint8Array<ArrayBuffer> {
     return bytes;
 }
 
+// JWT_SECRETは不変なので、一度生成したCryptoKeyをモジュールレベルでキャッシュして再利用する
+let cachedKey: CryptoKey | null = null;
+let cachedSecret: string = '';
+
 async function getKey(secret: string): Promise<CryptoKey> {
-    return crypto.subtle.importKey(
+    // 前回と同じsecretならキャッシュ済みのKeyをそのまま返す
+    if (cachedKey !== null && cachedSecret === secret) {
+        return cachedKey;
+    }
+    // secretが変わった場合（または初回）のみimportKeyを実行してキャッシュを更新する
+    cachedKey = await crypto.subtle.importKey(
         'raw',
         new TextEncoder().encode(secret),
         { name: 'HMAC', hash: 'SHA-256' },
         false,
         ['sign', 'verify']
     );
+    cachedSecret = secret;
+    return cachedKey;
 }
 
 export async function signJWT(uid: string): Promise<string> {
