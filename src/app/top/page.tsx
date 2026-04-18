@@ -198,15 +198,15 @@ function TopPageContent() {
         }
     }, [searchParams]);
 
-    // プリフェッチ
+    // プリフェッチ: 前後14日のみ、4並列で抑制的に（Workerの負荷集中を回避）
     useEffect(() => {
         if (!userId) return;
         if (!isWithinCurrentMonthRange(new Date())) return;
 
         const today = startOfDay(new Date());
         const dates: Date[] = [];
-        const start = subMonths(today, 1);
-        const end = addMonths(today, 2);
+        const start = subDays(today, 14);
+        const end = addDays(today, 14);
         let cur = startOfDay(start);
         while (cur <= end) {
             if (!isSameDay(cur, today)) dates.push(new Date(cur));
@@ -220,10 +220,9 @@ function TopPageContent() {
 
         const phases = [
             dates.filter(d => Math.abs(differenceInDays(d, today)) <= 1),
-            dates.filter(d => { const diff = Math.abs(differenceInDays(d, today)); return diff > 1 && diff <= 7; }),
-            dates.filter(d => Math.abs(differenceInDays(d, today)) > 7),
+            dates.filter(d => Math.abs(differenceInDays(d, today)) > 1),
         ];
-        const delays = [100, 500, 1000];
+        const delays = [200, 1000];
         const mountedRef = { current: true };
 
         phases.forEach((phaseDates, i) => {
@@ -233,9 +232,9 @@ function TopPageContent() {
                     const c = getCachedTasksForDateWithoutTTL(userId, d);
                     return c === null || c.length === 0;
                 });
-                for (let j = 0; j < toFetch.length; j += 8) {
+                for (let j = 0; j < toFetch.length; j += 4) {
                     if (!mountedRef.current) break;
-                    const batch = toFetch.slice(j, j + 8);
+                    const batch = toFetch.slice(j, j + 4);
                     await Promise.all(batch.map(async (d) => {
                         try {
                             const ds = format(d, 'yyyy-MM-dd');
@@ -252,7 +251,7 @@ function TopPageContent() {
                             }
                         } catch (_) {}
                     }));
-                    if (j + 8 < toFetch.length) await new Promise(r => setTimeout(r, 200));
+                    if (j + 4 < toFetch.length) await new Promise(r => setTimeout(r, 300));
                 }
             }, delays[i]);
         });

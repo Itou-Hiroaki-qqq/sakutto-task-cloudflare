@@ -1,15 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser } from '@/lib/auth';
 import {
-    getTasksForDate,
     getTasksBasicForDate,
+    getTasksForDateUnified,
     updateTasksWithCompletionStatus,
-    getCarryoverTasks,
-    getCarryoverCompletedTasksForDate,
 } from '@/lib/tasks';
 import { getTodayJST } from '@/lib/timezone';
 import { getDB } from '@/lib/db';
-import { isSameDay } from 'date-fns';
 
 export async function GET(request: NextRequest) {
     try {
@@ -27,36 +24,9 @@ export async function GET(request: NextRequest) {
         }
 
         const date = new Date(dateStr);
-        let tasks;
-
-        if (basic) {
-            tasks = await getTasksBasicForDate(payload.uid, date);
-        } else {
-            tasks = await getTasksForDate(payload.uid, date);
-        }
-
-        if (!basic) {
-            const todayJST = getTodayJST();
-            if (isSameDay(date, todayJST)) {
-                // 今日: 未完了の引継ぎタスク + 今日完了した引継ぎタスクをマージ
-                try {
-                    const carryoverTasks = await getCarryoverTasks(payload.uid, todayJST);
-                    tasks = [...tasks, ...carryoverTasks];
-                } catch (carryoverError) {
-                    console.error('Error fetching carryover tasks (non-fatal):', carryoverError);
-                }
-            } else {
-                // 過去の日付: その日に完了された引継ぎタスクをマージ
-                try {
-                    const carryoverCompleted = await getCarryoverCompletedTasksForDate(payload.uid, date);
-                    if (carryoverCompleted.length > 0) {
-                        tasks = [...tasks, ...carryoverCompleted];
-                    }
-                } catch (carryoverError) {
-                    console.error('Error fetching carryover completed tasks (non-fatal):', carryoverError);
-                }
-            }
-        }
+        const tasks = basic
+            ? await getTasksBasicForDate(payload.uid, date)
+            : await getTasksForDateUnified(payload.uid, date, getTodayJST());
 
         return NextResponse.json({ tasks });
     } catch (error) {

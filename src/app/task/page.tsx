@@ -36,9 +36,7 @@ function TaskEditPageContent() {
 
     const [showDatePicker, setShowDatePicker] = useState(false);
     const [loading, setLoading] = useState(false);
-    const [saving, setSaving] = useState(false);
     const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-    const [deleting, setDeleting] = useState(false);
     const [showSaveScopeDialog, setShowSaveScopeDialog] = useState(false);
     const [completionDate, setCompletionDate] = useState<string | null>(null); // 引継ぎタスクの完了日
 
@@ -248,39 +246,13 @@ function TaskEditPageContent() {
         const dateStrForCache = updateScope === 'this_only' && returnDate ? returnDate : format(dueDate, 'yyyy-MM-dd');
         const occurrenceDate = parseISO(dateStrForCache);
 
-        // 新規タスク: POSTを先に完了させ本物のtaskIdでoverride設定→遷移
+        // 新規タスク: 仮IDで楽観的にキャッシュ挿入→即遷移→バックグラウンドPOST
         if (!taskIdParam) {
-            setSaving(true);
-            let realTaskId: string | null = null;
-            try {
-                const response = await fetch('/api/tasks', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-                if (response.ok) {
-                    const data = await (response.json() as Promise<any>);
-                    realTaskId = data.taskId || null;
-                } else {
-                    const err = await (response.json() as Promise<any>).catch(() => ({}));
-                    if (userId && isWithinCurrentMonthRange(occurrenceDate)) {
-                        clearClientTasksCache(userId, dateStrForCache);
-                    }
-                    try { sessionStorage.setItem('task_save_error', err?.error ?? '保存に失敗しました'); } catch (_) {}
-                }
-            } catch (_) {
-                if (userId && isWithinCurrentMonthRange(occurrenceDate)) {
-                    clearClientTasksCache(userId, dateStrForCache);
-                }
-                try { sessionStorage.setItem('task_save_error', '保存に失敗しました'); } catch (_) {}
-            } finally {
-                setSaving(false);
-            }
-
-            if (realTaskId && userId && isWithinCurrentMonthRange(occurrenceDate)) {
+            const tempTaskId = `temp-${crypto.randomUUID()}`;
+            if (userId && isWithinCurrentMonthRange(occurrenceDate)) {
                 const newTask: DisplayTask = {
-                    id: `single-${realTaskId}`,
-                    task_id: realTaskId,
+                    id: `single-${tempTaskId}`,
+                    task_id: tempTaskId,
                     title: title.trim(),
                     date: occurrenceDate,
                     due_date: dueDate,
@@ -305,34 +277,81 @@ function TaskEditPageContent() {
             } else {
                 router.push(returnUrl);
             }
+
+            (async () => {
+                try {
+                    const response = await fetch('/api/tasks', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    if (response.ok) {
+                        const data = await (response.json() as Promise<any>);
+                        const realTaskId = data.taskId || null;
+                        if (realTaskId && userId && isWithinCurrentMonthRange(occurrenceDate)) {
+                            const existing = getCachedTasksForDateWithoutTTL(userId, occurrenceDate) ?? [];
+                            const updated = existing.map((t) =>
+                                t.task_id === tempTaskId
+                                    ? { ...t, id: `single-${realTaskId}`, task_id: realTaskId }
+                                    : t
+                            );
+                            updateTasksCache(
+                                userId,
+                                { [dateStrForCache]: updated },
+                                format(subMonths(occurrenceDate, 1), 'yyyy-MM-dd'),
+                                format(addMonths(occurrenceDate, 2), 'yyyy-MM-dd')
+                            );
+                        }
+                    } else {
+                        const err = await (response.json() as Promise<any>).catch(() => ({}));
+                        if (userId && isWithinCurrentMonthRange(occurrenceDate)) {
+                            clearClientTasksCache(userId, dateStrForCache);
+                        }
+                        try { sessionStorage.setItem('task_save_error', err?.error ?? '保存に失敗しました'); } catch (_) {}
+                    }
+                } catch (_) {
+                    if (userId && isWithinCurrentMonthRange(occurrenceDate)) {
+                        clearClientTasksCache(userId, dateStrForCache);
+                    }
+                    try { sessionStorage.setItem('task_save_error', '保存に失敗しました'); } catch (_) {}
+                }
+            })();
             return;
         }
 
         // 既存タスク編集: 楽観的更新してから遷移・バックグラウンドPUT
-        if (userId && updateScope !== 'all_future' && isWithinCurrentMonthRange(occurrenceDate)) {
-            const optimisticTask: DisplayTask = {
-                id: taskIdParam,
-                task_id: taskIdParam,
-                title: title.trim(),
-                date: occurrenceDate,
-                due_date: dueDate,
-                notification_time: notificationEnabled ? notificationTime : undefined,
-                completed: false,
-                is_recurring: recurrenceType !== null,
-                created_at: new Date(),
-            };
-            const existing = getCachedTasksForDateWithoutTTL(userId, occurrenceDate) ?? [];
-            const newList = existing.map((t) => (t.task_id === taskIdParam ? optimisticTask : t));
-            updateTasksCache(
-                userId,
-                { [dateStrForCache]: newList },
-                format(subMonths(occurrenceDate, 1), 'yyyy-MM-dd'),
-                format(addMonths(occurrenceDate, 2), 'yyyy-MM-dd')
-            );
-            setTasksOverride(userId, dateStrForCache, newList);
-        }
-        if (userId && updateScope === 'all_future') {
-            clearClientTasksCache(userId);
+        if (userId && isWithinCurrentMonthRange(occurrenceDate)) {
+            if (updateScope === 'all_future') {
+                clearClientTasksCache(userId);
+            } else if (updateScope === 'this_only') {
+                // this_only は新task_idが発行されるため楽観的更新はできない。
+                // 該当日のキャッシュを破棄して /top の再フェッチに任せる
+                clearClientTasksCache(userId, dateStrForCache);
+                if (returnDate && returnDate !== dateStrForCache) {
+                    clearClientTasksCache(userId, returnDate);
+                }
+            } else {
+                const optimisticTask: DisplayTask = {
+                    id: taskIdParam,
+                    task_id: taskIdParam,
+                    title: title.trim(),
+                    date: occurrenceDate,
+                    due_date: dueDate,
+                    notification_time: notificationEnabled ? notificationTime : undefined,
+                    completed: false,
+                    is_recurring: recurrenceType !== null,
+                    created_at: new Date(),
+                };
+                const existing = getCachedTasksForDateWithoutTTL(userId, occurrenceDate) ?? [];
+                const newList = existing.map((t) => (t.task_id === taskIdParam ? optimisticTask : t));
+                updateTasksCache(
+                    userId,
+                    { [dateStrForCache]: newList },
+                    format(subMonths(occurrenceDate, 1), 'yyyy-MM-dd'),
+                    format(addMonths(occurrenceDate, 2), 'yyyy-MM-dd')
+                );
+                setTasksOverride(userId, dateStrForCache, newList);
+            }
         }
 
         if (returnDate) {
@@ -341,7 +360,7 @@ function TaskEditPageContent() {
             router.push(returnUrl);
         }
 
-        // 編集保存はバックグラウンドで実行
+        // 編集保存はバックグラウンドで実行（成功時の refetch は廃止）
         (async () => {
             try {
                 const response = await fetch('/api/tasks', {
@@ -350,35 +369,7 @@ function TaskEditPageContent() {
                     body: JSON.stringify(payload),
                 });
 
-                if (response.ok) {
-                    if (userId && (updateScope !== 'all_future')) {
-                        const datesToRefresh = new Set<string>([dateStrForCache]);
-                        if (updateScope === 'this_only' && returnDate) datesToRefresh.add(returnDate);
-                        try {
-                            for (const ds of datesToRefresh) {
-                                const res = await fetch(`/api/tasks?date=${ds}`);
-                                if (res.ok && isWithinCurrentMonthRange(parseISO(ds))) {
-                                    const data = await res.json() as any;
-                                    const tasksRaw = (data.tasks || []).map((t: any) => ({
-                                        ...t,
-                                        date: typeof t.date === 'string' ? parseISO(t.date) : new Date(t.date),
-                                        due_date: typeof t.due_date === 'string' ? parseISO(t.due_date) : new Date(t.due_date),
-                                        created_at: t.created_at ? (typeof t.created_at === 'string' ? parseISO(t.created_at) : new Date(t.created_at)) : undefined,
-                                    }));
-                                    updateTasksCache(
-                                        userId,
-                                        { [ds]: tasksRaw },
-                                        format(subMonths(parseISO(ds), 1), 'yyyy-MM-dd'),
-                                        format(addMonths(parseISO(ds), 2), 'yyyy-MM-dd')
-                                    );
-                                }
-                            }
-                        } catch (_) {}
-                    }
-                    if (userId && recurrenceType && updateScope === 'all_future') {
-                        clearClientTasksCache(userId);
-                    }
-                } else {
+                if (!response.ok) {
                     const err = await (response.json() as Promise<any>).catch(() => ({}));
                     if (userId && isWithinCurrentMonthRange(occurrenceDate)) {
                         clearClientTasksCache(userId, dateStrForCache);
@@ -457,87 +448,68 @@ function TaskEditPageContent() {
             return;
         }
 
-        setDeleting(true);
-        try {
-            const payload: any = {};
+        const dateStr = format(dueDate, 'yyyy-MM-dd');
+        const taskDate = parseISO(dateStr);
+        const returnDate = searchParams.get('date');
+        const returnUrl = searchParams.get('returnUrl') || '/top';
 
-            if (hasRecurrence) {
-                payload.deleteOption = deleteOption;
-                payload.targetDate = format(dueDate, 'yyyy-MM-dd');
-            }
-
-            const response = await fetch(`/api/tasks/${taskIdParam}`, {
-                method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
-
-            if (response.ok) {
-                if (userId) {
-                    const taskDate = parseISO(format(dueDate, 'yyyy-MM-dd'));
-                    if (isWithinCurrentMonthRange(taskDate)) {
-                        if (hasRecurrence) {
-                            clearClientTasksCache(userId);
-                        } else {
-                            try {
-                                const dateStr = format(dueDate, 'yyyy-MM-dd');
-                                const updatedTasksResponse = await fetch(`/api/tasks?date=${dateStr}`);
-                                if (updatedTasksResponse.ok) {
-                                    const updatedData = await updatedTasksResponse.json() as any;
-                                    if (updatedData.tasks) {
-                                        const updatedTasksRaw: any[] = updatedData.tasks;
-                                        const updatedTasks = updatedTasksRaw.map((task: any) => ({
-                                            ...task,
-                                            date: typeof task.date === 'string' ? parseISO(task.date) : new Date(task.date),
-                                            due_date: typeof task.due_date === 'string' ? parseISO(task.due_date) : new Date(task.due_date),
-                                            created_at: task.created_at ? (typeof task.created_at === 'string' ? parseISO(task.created_at) : new Date(task.created_at)) : undefined,
-                                        }));
-                                        updateTasksCache(
-                                            userId,
-                                            { [dateStr]: updatedTasks },
-                                            format(subMonths(taskDate, 1), 'yyyy-MM-dd'),
-                                            format(addMonths(taskDate, 2), 'yyyy-MM-dd')
-                                        );
-                                    } else {
-                                        updateTasksCache(
-                                            userId,
-                                            { [dateStr]: [] },
-                                            format(subMonths(taskDate, 1), 'yyyy-MM-dd'),
-                                            format(addMonths(taskDate, 2), 'yyyy-MM-dd')
-                                        );
-                                    }
-                                } else {
-                                    const dateStr = format(dueDate, 'yyyy-MM-dd');
-                                    clearClientTasksCache(userId, dateStr);
-                                }
-                            } catch (cacheError) {
-                                console.warn('Failed to update cache after delete:', cacheError);
-                                const dateStr = format(dueDate, 'yyyy-MM-dd');
-                                clearClientTasksCache(userId, dateStr);
-                            }
-                        }
-                    }
-                }
-
-                const returnDate = searchParams.get('date');
-                const returnUrl = searchParams.get('returnUrl') || '/top';
-                if (returnDate) {
-                    router.push(`${returnUrl}?date=${returnDate}`);
-                } else {
-                    router.push(returnUrl);
-                }
-            } else {
-                const error = await response.json() as any;
-                console.error('Delete error:', error);
-                alert(error.error || '削除に失敗しました');
-            }
-        } catch (error) {
-            console.error('Failed to delete task:', error);
-            alert('削除に失敗しました');
-        } finally {
-            setDeleting(false);
-            setShowDeleteDialog(false);
+        const requestPayload: any = {};
+        if (hasRecurrence) {
+            requestPayload.deleteOption = deleteOption;
+            requestPayload.targetDate = dateStr;
         }
+
+        // 楽観的にキャッシュから除去して即遷移
+        if (userId && isWithinCurrentMonthRange(taskDate)) {
+            if (hasRecurrence && deleteOption === 'future_all') {
+                clearClientTasksCache(userId);
+            } else {
+                // 単発削除 or 繰り返しの this_only: 該当日のキャッシュから該当タスクを除去
+                const targetDateStr = returnDate || dateStr;
+                const targetDate = parseISO(targetDateStr);
+                const existing = getCachedTasksForDateWithoutTTL(userId, targetDate) ?? [];
+                const filtered = existing.filter((t) => t.task_id !== taskIdParam);
+                if (isWithinCurrentMonthRange(targetDate)) {
+                    updateTasksCache(
+                        userId,
+                        { [targetDateStr]: filtered },
+                        format(subMonths(targetDate, 1), 'yyyy-MM-dd'),
+                        format(addMonths(targetDate, 2), 'yyyy-MM-dd')
+                    );
+                    setTasksOverride(userId, targetDateStr, filtered);
+                }
+            }
+        }
+
+        setShowDeleteDialog(false);
+        if (returnDate) {
+            router.push(`${returnUrl}?date=${returnDate}`);
+        } else {
+            router.push(returnUrl);
+        }
+
+        // バックグラウンドでDELETE実行
+        (async () => {
+            try {
+                const response = await fetch(`/api/tasks/${taskIdParam}`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestPayload),
+                });
+                if (!response.ok) {
+                    const err = await (response.json() as Promise<any>).catch(() => ({}));
+                    if (userId && isWithinCurrentMonthRange(taskDate)) {
+                        clearClientTasksCache(userId, dateStr);
+                    }
+                    try { sessionStorage.setItem('task_save_error', err?.error ?? '削除に失敗しました'); } catch (_) {}
+                }
+            } catch (_) {
+                if (userId && isWithinCurrentMonthRange(taskDate)) {
+                    clearClientTasksCache(userId, dateStr);
+                }
+                try { sessionStorage.setItem('task_save_error', '削除に失敗しました'); } catch (_) {}
+            }
+        })();
     };
 
     // 認証前のみ全画面スピナー
@@ -694,25 +666,17 @@ function TaskEditPageContent() {
                             <button
                                 onClick={() => handleDelete()}
                                 className="btn btn-ghost btn-circle"
-                                disabled={deleting || loading}
+                                disabled={loading}
                             >
-                                {deleting ? (
-                                    <span className="loading loading-spinner loading-sm"></span>
-                                ) : (
-                                    <span className="material-icons text-error">delete</span>
-                                )}
+                                <span className="material-icons text-error">delete</span>
                             </button>
                         )}
                         <button
                             onClick={handleSave}
                             className="btn btn-ghost btn-circle"
-                            disabled={saving || loading}
+                            disabled={loading}
                         >
-                            {saving ? (
-                                <span className="loading loading-spinner loading-sm"></span>
-                            ) : (
-                                <span className="material-icons">save</span>
-                            )}
+                            <span className="material-icons">save</span>
                         </button>
                     </div>
                 </div>
@@ -1077,7 +1041,6 @@ function TaskEditPageContent() {
                             <button
                                 onClick={() => setShowSaveScopeDialog(false)}
                                 className="btn btn-ghost"
-                                disabled={saving}
                             >
                                 キャンセル
                             </button>
@@ -1089,16 +1052,8 @@ function TaskEditPageContent() {
                                     }
                                 }}
                                 className="btn btn-primary"
-                                disabled={saving}
                             >
-                                {saving ? (
-                                    <>
-                                        <span className="loading loading-spinner loading-sm"></span>
-                                        保存中...
-                                    </>
-                                ) : (
-                                    '保存'
-                                )}
+                                保存
                             </button>
                         </div>
                     </div>
@@ -1140,7 +1095,6 @@ function TaskEditPageContent() {
                                     <button
                                         onClick={() => { setShowDeleteDialog(false); }}
                                         className="btn btn-ghost"
-                                        disabled={deleting}
                                     >
                                         キャンセル
                                     </button>
@@ -1152,16 +1106,8 @@ function TaskEditPageContent() {
                                             }
                                         }}
                                         className="btn btn-error"
-                                        disabled={deleting}
                                     >
-                                        {deleting ? (
-                                            <>
-                                                <span className="loading loading-spinner loading-sm"></span>
-                                                削除中...
-                                            </>
-                                        ) : (
-                                            '削除'
-                                        )}
+                                        削除
                                     </button>
                                 </div>
                             </>
@@ -1173,23 +1119,14 @@ function TaskEditPageContent() {
                                     <button
                                         onClick={() => { setShowDeleteDialog(false); }}
                                         className="btn btn-ghost"
-                                        disabled={deleting}
                                     >
                                         キャンセル
                                     </button>
                                     <button
                                         onClick={() => { handleDelete('this_only'); }}
                                         className="btn btn-error"
-                                        disabled={deleting}
                                     >
-                                        {deleting ? (
-                                            <>
-                                                <span className="loading loading-spinner loading-sm"></span>
-                                                削除中...
-                                            </>
-                                        ) : (
-                                            '削除'
-                                        )}
+                                        削除
                                     </button>
                                 </div>
                             </>

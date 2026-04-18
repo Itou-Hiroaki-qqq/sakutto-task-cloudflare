@@ -109,6 +109,9 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_task_recurrences_task_id ON task_recurrences(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_completions_task_id ON task_completions(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_completions_date ON task_completions(completed_date);
+CREATE INDEX IF NOT EXISTS idx_task_completions_carryover
+    ON task_completions(task_id, carryover_from_date)
+    WHERE carryover_from_date IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_task_exclusions_task_id ON task_exclusions(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_exclusions_date ON task_exclusions(excluded_date);
 CREATE INDEX IF NOT EXISTS idx_user_notification_settings_user_id ON user_notification_settings(user_id);

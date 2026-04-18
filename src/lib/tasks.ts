@@ -233,12 +233,23 @@ export async function updateTasksWithCompletionStatus(
     });
 }
 
-// 未完了の過去タスクを引継ぎタスクとして取得（過去30日・最大50件）
-export async function getCarryoverTasks(userId: string, todayJST: Date): Promise<DisplayTask[]> {
+// 指定日のタスク + 引継ぎタスク（今日 or 過去）を一括取得
+// 既存の getTasksForDate + getCarryoverTasks + getCarryoverCompletedTasksForDate を統合し、
+// tasks/exclusions の重複SELECTを排除、完了系クエリを並列化して DB roundtrip を約3倍短縮
+export async function getTasksForDateUnified(
+    userId: string,
+    targetDate: Date,
+    todayJST: Date
+): Promise<DisplayTask[]> {
     const db = await getDB();
+    const targetDateStart = startOfDay(targetDate);
     const todayStart = startOfDay(todayJST);
-    const thirtyDaysAgo = addDays(todayStart, -30);
+    const targetDateStr = format(targetDateStart, 'yyyy-MM-dd');
+    const todayStr = format(todayStart, 'yyyy-MM-dd');
+    const isToday = isSameDay(targetDateStart, todayStart);
+    const isPast = isBefore(targetDateStart, todayStart);
 
+    // Step 1: タスク + 繰り返し（1クエリ）
     const { results: tasks } = await db
         .prepare(`
             SELECT
@@ -253,90 +264,163 @@ export async function getCarryoverTasks(userId: string, todayJST: Date): Promise
         .bind(userId)
         .all<any>();
 
-    // タスクと元の出現日のペアを収集
-    const carryoverPairs: Array<{ task: any; originalDate: Date }> = [];
+    if (tasks.length === 0) return [];
+
+    // Step 2: 除外日（1クエリ）
     const recurringTaskIds = tasks.filter(t => t.recurrence_type).map(t => t.id);
     const exclusionsMap = await getTaskExclusionsBatch(db, recurringTaskIds);
 
+    // Step 3: targetDate に該当するタスクを収集
+    const targetMatching: any[] = [];
     for (const task of tasks) {
-        const taskDueDate = new Date(task.due_date);
-        taskDueDate.setHours(0, 0, 0, 0);
-
+        const taskDueDate = startOfDay(new Date(task.due_date));
         if (!task.recurrence_type) {
-            // 単発タスク: 30日以内の過去 due_date のもの
-            if (isBefore(taskDueDate, todayStart) && !isBefore(taskDueDate, thirtyDaysAgo)) {
-                carryoverPairs.push({ task, originalDate: taskDueDate });
-            }
+            if (isSameDay(taskDueDate, targetDateStart)) targetMatching.push(task);
         } else {
-            // 繰り返しタスク: 30日間ウィンドウ内の各日を直接チェック（高速化）
-            if (isBefore(taskDueDate, todayStart)) {
-                const exclusions = exclusionsMap.get(task.id) || null;
-                const weekdays = parseWeekdays(task.recurrence_weekdays);
+            const weekdays = parseWeekdays(task.recurrence_weekdays);
+            const exclusions = exclusionsMap.get(task.id) || null;
+            if (shouldIncludeRecurringTaskWithExclusions(
+                task.id, task.recurrence_type, taskDueDate, targetDateStart,
+                task.custom_days, task.custom_unit, weekdays, exclusions
+            )) targetMatching.push(task);
+        }
+    }
 
-                // thirtyDaysAgo から todayStart(exclusive) までの各日をチェック
-                let checkDate = new Date(thirtyDaysAgo);
-                while (isBefore(checkDate, todayStart)) {
-                    if (shouldIncludeRecurringTaskWithExclusions(
-                        task.id, task.recurrence_type, taskDueDate, checkDate,
-                        task.custom_days, task.custom_unit, weekdays, exclusions
-                    )) {
-                        carryoverPairs.push({ task, originalDate: new Date(checkDate) });
+    // Step 4: 今日のみ – 引継ぎ候補を収集（過去30日）
+    const carryoverPairs: Array<{ task: any; originalDate: Date }> = [];
+    if (isToday) {
+        const thirtyDaysAgo = addDays(todayStart, -30);
+        for (const task of tasks) {
+            const taskDueDate = startOfDay(new Date(task.due_date));
+            if (!task.recurrence_type) {
+                if (isBefore(taskDueDate, todayStart) && !isBefore(taskDueDate, thirtyDaysAgo)) {
+                    carryoverPairs.push({ task, originalDate: taskDueDate });
+                }
+            } else {
+                if (isBefore(taskDueDate, todayStart)) {
+                    const exclusions = exclusionsMap.get(task.id) || null;
+                    const weekdays = parseWeekdays(task.recurrence_weekdays);
+                    let checkDate = new Date(thirtyDaysAgo);
+                    while (isBefore(checkDate, todayStart)) {
+                        if (shouldIncludeRecurringTaskWithExclusions(
+                            task.id, task.recurrence_type, taskDueDate, checkDate,
+                            task.custom_days, task.custom_unit, weekdays, exclusions
+                        )) {
+                            carryoverPairs.push({ task, originalDate: new Date(checkDate) });
+                        }
+                        checkDate = addDays(checkDate, 1);
                     }
-                    checkDate = addDays(checkDate, 1);
                 }
             }
         }
     }
 
-    // 完了状態を一括取得（元の日付ベース）
-    const completionPairs = carryoverPairs.map(p => ({ taskId: p.task.id, date: p.originalDate }));
-    const completionsMap = await getTaskCompletionsBatch(db, completionPairs);
+    // Step 5: 完了系を並列取得（最大3クエリ並列）
+    const completionPairs: Array<{ taskId: string; date: Date }> = [
+        ...targetMatching.map(t => ({ taskId: t.id, date: targetDateStart })),
+        ...carryoverPairs.map(p => ({ taskId: p.task.id, date: p.originalDate })),
+    ];
+    const targetMatchingIds = targetMatching.map(t => t.id);
+    const carryoverTaskIds = carryoverPairs.map(p => p.task.id);
 
-    // carryover_from_date 付きの完了レコードを一括取得（完了日を問わず検索）
-    const carryoverCompletionsMap = await getCarryoverCompletionsBatch(db, carryoverPairs.map(p => p.task.id));
+    const [completionsMap, carryoverRowsForToday, awaySet, pastCarryoverRows] = await Promise.all([
+        getTaskCompletionsBatch(db, completionPairs),
+        isToday
+            ? getCarryoverCompletionsBatch(db, carryoverTaskIds)
+            : Promise.resolve(new Map<string, { completed: boolean; completed_date: string }>()),
+        isPast
+            ? getCarryoverAwayTaskIds(db, targetMatchingIds, targetDateStr)
+            : Promise.resolve(new Set<string>()),
+        isPast
+            ? getPastCarryoverCompletedForDate(db, userId, targetDateStr)
+            : Promise.resolve([] as Array<{ task_id: string; carryover_from_date: string }>),
+    ]);
 
-    // 未完了 + 今日完了した引継ぎタスクを DisplayTask に変換
-    const todayStr = format(todayJST, 'yyyy-MM-dd');
-    const carryoverTasks: DisplayTask[] = [];
-    for (const { task, originalDate } of carryoverPairs) {
-        const originalDateStr = format(originalDate, 'yyyy-MM-dd');
-        const key = `${task.id}_${originalDateStr}`;
-        const completionOnOriginal = completionsMap.get(key);
+    // Step 6: targetDate のタスクを DisplayTask に変換
+    const displayTasks: DisplayTask[] = [];
+    for (const task of targetMatching) {
+        const taskDueDate = startOfDay(new Date(task.due_date));
+        const isRecurring = !!task.recurrence_type;
+        if (!isRecurring && awaySet.has(task.id)) continue;
+        if (isRecurring && awaySet.has(`${task.id}_${targetDateStr}`)) continue;
 
-        // 元の日付で完了済み（通常完了）→ 引継ぎ対象外
-        if (completionOnOriginal?.completed) continue;
-
-        // carryover完了をチェック
-        const carryoverCompletion = carryoverCompletionsMap.get(`${task.id}_${originalDateStr}`);
-
-        // 過去の日に完了済みの引継ぎタスクはスキップ（完了した日に固定される）
-        if (carryoverCompletion?.completed && carryoverCompletion.completed_date !== todayStr) {
-            continue;
-        }
-
-        const isCompletedAsCarryover = !!carryoverCompletion?.completed;
-
-        const taskDueDate = new Date(task.due_date);
-        taskDueDate.setHours(0, 0, 0, 0);
-        carryoverTasks.push({
-            id: `carryover-${task.id}-${originalDateStr}`,
+        const completion = completionsMap.get(`${task.id}_${targetDateStr}`);
+        displayTasks.push({
+            id: isRecurring ? `recurring-${task.id}-${targetDateStr}` : `single-${task.id}`,
             task_id: task.id,
             title: task.title,
-            date: todayJST,
+            date: targetDate,
             due_date: taskDueDate,
             notification_time: task.notification_time || undefined,
-            completed: isCompletedAsCarryover,
-            is_recurring: !!task.recurrence_type,
-            is_carryover: true,
-            original_date: originalDate,
+            completed: completion?.completed || false,
+            is_recurring: isRecurring,
             created_at: new Date(task.created_at),
         });
     }
+    const sortedTarget = sortDisplayTasks(displayTasks);
 
-    // original_date の古い順にソートして上限50件で切り捨て
-    return carryoverTasks
-        .sort((a, b) => (a.original_date!.getTime()) - (b.original_date!.getTime()))
-        .slice(0, 50);
+    // Step 7: 今日 – 引継ぎタスクを末尾に追加
+    if (isToday) {
+        const carryoverTasks: DisplayTask[] = [];
+        for (const { task, originalDate } of carryoverPairs) {
+            const originalDateStr = format(originalDate, 'yyyy-MM-dd');
+            const completionOnOriginal = completionsMap.get(`${task.id}_${originalDateStr}`);
+            if (completionOnOriginal?.completed) continue;
+
+            const carryoverCompletion = carryoverRowsForToday.get(`${task.id}_${originalDateStr}`);
+            if (carryoverCompletion?.completed && carryoverCompletion.completed_date !== todayStr) continue;
+
+            const isCompletedAsCarryover = !!carryoverCompletion?.completed;
+            const taskDueDate = startOfDay(new Date(task.due_date));
+            carryoverTasks.push({
+                id: `carryover-${task.id}-${originalDateStr}`,
+                task_id: task.id,
+                title: task.title,
+                date: todayJST,
+                due_date: taskDueDate,
+                notification_time: task.notification_time || undefined,
+                completed: isCompletedAsCarryover,
+                is_recurring: !!task.recurrence_type,
+                is_carryover: true,
+                original_date: originalDate,
+                created_at: new Date(task.created_at),
+            });
+        }
+        const sortedCarryover = carryoverTasks
+            .sort((a, b) => a.original_date!.getTime() - b.original_date!.getTime())
+            .slice(0, 50);
+        return [...sortedTarget, ...sortedCarryover];
+    }
+
+    // Step 8: 過去日付 – その日に完了された引継ぎタスクを末尾に追加
+    if (isPast && pastCarryoverRows.length > 0) {
+        const taskMap = new Map<string, any>();
+        for (const t of tasks) taskMap.set(t.id, t);
+
+        const pastCarryoverTasks: DisplayTask[] = [];
+        for (const row of pastCarryoverRows) {
+            const task = taskMap.get(row.task_id);
+            if (!task) continue;
+            const originalDate = startOfDay(new Date(row.carryover_from_date));
+            const taskDueDate = startOfDay(new Date(task.due_date));
+            pastCarryoverTasks.push({
+                id: `carryover-${task.id}-${row.carryover_from_date}`,
+                task_id: task.id,
+                title: task.title,
+                date: targetDate,
+                due_date: taskDueDate,
+                notification_time: task.notification_time || undefined,
+                completed: true,
+                is_recurring: !!task.recurrence_type,
+                is_carryover: true,
+                original_date: originalDate,
+                created_at: new Date(task.created_at),
+            });
+        }
+        return [...sortedTarget, ...pastCarryoverTasks];
+    }
+
+    return sortedTarget;
 }
 
 // タスクの完了状態を更新
@@ -611,17 +695,13 @@ async function getCarryoverCompletionsBatch(
     return resultMap;
 }
 
-// 指定日に完了された引継ぎタスクを取得（過去の日付表示用）
-export async function getCarryoverCompletedTasksForDate(
+// targetDate に引継ぎ完了された task_id + carryover_from_date を返す（getTasksForDateUnified用）
+async function getPastCarryoverCompletedForDate(
+    db: D1Database,
     userId: string,
-    targetDate: Date
-): Promise<DisplayTask[]> {
-    const db = await getDB();
-    const dateStr = format(targetDate, 'yyyy-MM-dd');
-
-    // completed_date = targetDate かつ carryover_from_date IS NOT NULL の完了レコードを取得
-    const BATCH_SIZE = 50;
-    const { results: completionRows } = await db
+    targetDateStr: string
+): Promise<Array<{ task_id: string; carryover_from_date: string }>> {
+    const { results } = await db
         .prepare(
             `SELECT tc.task_id, tc.carryover_from_date
              FROM task_completions tc
@@ -630,59 +710,14 @@ export async function getCarryoverCompletedTasksForDate(
              AND tc.completed_date = ?
              AND tc.carryover_from_date IS NOT NULL
              AND tc.completed = 1
-             LIMIT ?`
+             LIMIT 50`
         )
-        .bind(userId, dateStr, BATCH_SIZE)
+        .bind(userId, targetDateStr)
         .all<any>();
-
-    if (completionRows.length === 0) return [];
-
-    // 対象タスクの詳細を取得
-    const taskIds = [...new Set(completionRows.map(r => r.task_id))];
-    const taskMap = new Map<string, any>();
-
-    for (let i = 0; i < taskIds.length; i += BATCH_SIZE) {
-        const batch = taskIds.slice(i, i + BATCH_SIZE);
-        const { results: tasks } = await db
-            .prepare(
-                `SELECT t.id, t.title, t.due_date, t.notification_time, t.created_at,
-                        tr.type as recurrence_type
-                 FROM tasks t
-                 LEFT JOIN task_recurrences tr ON t.id = tr.task_id
-                 WHERE t.id IN (${inPlaceholders(batch.length)})`
-            )
-            .bind(...batch)
-            .all<any>();
-        for (const t of tasks) taskMap.set(t.id, t);
-    }
-
-    // DisplayTask に変換
-    const displayTasks: DisplayTask[] = [];
-    for (const row of completionRows) {
-        const task = taskMap.get(row.task_id);
-        if (!task) continue;
-
-        const originalDate = new Date(row.carryover_from_date);
-        originalDate.setHours(0, 0, 0, 0);
-        const taskDueDate = new Date(task.due_date);
-        taskDueDate.setHours(0, 0, 0, 0);
-
-        displayTasks.push({
-            id: `carryover-${task.id}-${row.carryover_from_date}`,
-            task_id: task.id,
-            title: task.title,
-            date: targetDate,
-            due_date: taskDueDate,
-            notification_time: task.notification_time || undefined,
-            completed: true,
-            is_recurring: !!task.recurrence_type,
-            is_carryover: true,
-            original_date: originalDate,
-            created_at: new Date(task.created_at),
-        });
-    }
-
-    return displayTasks;
+    return results.map((r: any) => ({
+        task_id: r.task_id,
+        carryover_from_date: r.carryover_from_date,
+    }));
 }
 
 // ソート関数
