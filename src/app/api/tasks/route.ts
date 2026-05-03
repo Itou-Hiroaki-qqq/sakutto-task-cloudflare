@@ -5,6 +5,7 @@ import {
     getTasksForDateUnified,
     updateTasksWithCompletionStatus,
 } from '@/lib/tasks';
+import { getMemorialsForDate, getAllMemorials } from '@/lib/memorials';
 import { getTodayJST } from '@/lib/timezone';
 import { getDB } from '@/lib/db';
 
@@ -18,16 +19,38 @@ export async function GET(request: NextRequest) {
         const searchParams = request.nextUrl.searchParams;
         const dateStr = searchParams.get('date');
         const basic = searchParams.get('basic') === 'true';
+        const includeMemorials = searchParams.get('includeMemorials') === 'true';
 
         if (!dateStr) {
             return NextResponse.json({ error: 'Date parameter is required' }, { status: 400 });
         }
 
         const date = new Date(dateStr);
-        const tasks = basic
-            ? await getTasksBasicForDate(payload.uid, date)
-            : await getTasksForDateUnified(payload.uid, date, getTodayJST());
 
+        if (basic) {
+            const tasks = await getTasksBasicForDate(payload.uid, date);
+            return NextResponse.json({ tasks });
+        }
+
+        if (includeMemorials) {
+            const [tasks, memorialsForDate, allMemorials] = await Promise.all([
+                getTasksForDateUnified(payload.uid, date, getTodayJST()),
+                getMemorialsForDate(payload.uid, date),
+                getAllMemorials(payload.uid),
+            ]);
+            const memorials = memorialsForDate.map((m) => ({ id: m.id, title: m.title }));
+            const memorialHolidays = allMemorials
+                .filter((m: any) => m.is_holiday)
+                .map((m: any) => ({
+                    due_date: m.due_date instanceof Date
+                        ? `${m.due_date.getFullYear()}-${String(m.due_date.getMonth() + 1).padStart(2, '0')}-${String(m.due_date.getDate()).padStart(2, '0')}`
+                        : String(m.due_date),
+                    recurrence_type: m.recurrence_type || null,
+                }));
+            return NextResponse.json({ tasks, memorials, memorialHolidays });
+        }
+
+        const tasks = await getTasksForDateUnified(payload.uid, date, getTodayJST());
         return NextResponse.json({ tasks });
     } catch (error) {
         console.error('Error fetching tasks:', error);

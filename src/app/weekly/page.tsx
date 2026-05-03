@@ -7,16 +7,17 @@ import TodoList from '@/components/TodoList';
 import { DisplayTask } from '@/types/database';
 import { format, startOfWeek, endOfWeek, eachDayOfInterval, addWeeks, subWeeks } from 'date-fns';
 import { ja } from 'date-fns/locale';
+import { useAuth } from '@/components/AuthProvider';
 
 function WeeklyPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
+    const { userId } = useAuth();
     const [currentWeek, setCurrentWeek] = useState(() => {
         const weekParam = searchParams.get('week');
         return weekParam ? new Date(weekParam) : new Date();
     });
     const [tasksByDate, setTasksByDate] = useState<Map<string, DisplayTask[]>>(new Map());
-    const [userId, setUserId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
 
     const weekStart = startOfWeek(currentWeek, { weekStartsOn: 0 });
@@ -24,14 +25,8 @@ function WeeklyPageContent() {
     const weekDays = eachDayOfInterval({ start: weekStart, end: weekEnd });
 
     useEffect(() => {
-        const checkAuth = async () => {
-            const res = await fetch('/api/auth/me');
-            if (!res.ok) { router.push('/login'); return; }
-            const { user } = await res.json() as any;
-            setUserId(user.id);
-        };
-        checkAuth();
-    }, [router]);
+        if (userId === null) router.push('/login');
+    }, [userId, router]);
 
     useEffect(() => {
         if (userId) {

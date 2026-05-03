@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Layout from '@/components/Layout';
+import { useAuth } from '@/components/AuthProvider';
 
 interface ExtractedEvent {
     date: string;
@@ -14,7 +15,7 @@ interface ExtractedEvent {
 
 export default function EventCalendarPage() {
     const router = useRouter();
-    const [userId, setUserId] = useState<string | null>(null);
+    const { userId } = useAuth();
     const [files, setFiles] = useState<File[]>([]);
     const [isDragging, setIsDragging] = useState(false);
     const [processing, setProcessing] = useState(false);
@@ -31,14 +32,8 @@ export default function EventCalendarPage() {
     const dropZoneRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        const checkAuth = async () => {
-            const res = await fetch('/api/auth/me');
-            if (!res.ok) { router.push('/login'); return; }
-            const { user } = await res.json() as any;
-            setUserId(user.id);
-        };
-        checkAuth();
-    }, [router]);
+        if (userId === null) router.push('/login');
+    }, [userId, router]);
 
     const handleFileSelect = (selectedFiles: FileList | null) => {
         if (!selectedFiles) return;

@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Layout from '@/components/Layout';
+import { useAuth } from '@/components/AuthProvider';
 
 interface NotificationSettings {
     email: string | null;
@@ -11,9 +12,9 @@ interface NotificationSettings {
 
 export default function NotificationSettingsPage() {
     const router = useRouter();
+    const { userId, email: authEmail } = useAuth();
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
-    const [userId, setUserId] = useState<string | null>(null);
     const [settings, setSettings] = useState<NotificationSettings>({
         email: null,
         email_notification_enabled: false,
@@ -24,8 +25,11 @@ export default function NotificationSettingsPage() {
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
     useEffect(() => {
-        checkAuth();
-    }, []);
+        if (userId === null) { router.push('/login'); return; }
+        if (!userId) return;
+        setLoginEmail(authEmail);
+        loadSettings();
+    }, [userId, authEmail, router]);
 
     useEffect(() => {
         const returnUrlParam = new URLSearchParams(window.location.search).get('returnUrl');
@@ -35,15 +39,6 @@ export default function NotificationSettingsPage() {
             sessionStorage.removeItem('notificationSettingsReturnUrl');
         }
     }, []);
-
-    const checkAuth = async () => {
-        const res = await fetch('/api/auth/me');
-        if (!res.ok) { router.push('/login'); return; }
-        const { user } = await res.json() as any;
-        setUserId(user.id);
-        setLoginEmail(user.email || null);
-        loadSettings();
-    };
 
     const loadSettings = async () => {
         try {

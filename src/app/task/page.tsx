@@ -8,11 +8,12 @@ import DatePicker from '@/components/DatePicker';
 import { RecurrenceType } from '@/types/database';
 import { clearTasksCache as clearClientTasksCache, getCachedTasksForDateWithoutTTL, isWithinCurrentMonthRange, setTasksOverride, updateTasksCache } from '@/lib/tasksCache';
 import { DisplayTask } from '@/types/database';
+import { useAuth } from '@/components/AuthProvider';
 
 function TaskEditPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
-    const [userId, setUserId] = useState<string | null>(null);
+    const { userId } = useAuth();
 
     // URLパラメータから取得
     const taskIdParam = searchParams.get('taskId');
@@ -40,25 +41,21 @@ function TaskEditPageContent() {
     const [showSaveScopeDialog, setShowSaveScopeDialog] = useState(false);
     const [completionDate, setCompletionDate] = useState<string | null>(null); // 引継ぎタスクの完了日
 
-    // 認証とタスク取得を並列実行して遷移を速くする
+    // 認証チェック（layout から userId を受け取る。null ならログインへ）
     useEffect(() => {
+        if (userId === null) router.push('/login');
+    }, [userId, router]);
+
+    // タスク取得
+    useEffect(() => {
+        if (!userId) return;
         const dateParam = searchParams.get('date');
 
         const run = async () => {
             const taskFetchUrl = taskIdParam
                 ? `/api/tasks/${taskIdParam}${dateParam ? `?date=${dateParam}` : ''}${isCarryover ? `${dateParam ? '&' : '?'}carryover=true` : ''}`
                 : null;
-            const [meResponse, taskResponse] = await Promise.all([
-                fetch('/api/auth/me'),
-                taskFetchUrl ? fetch(taskFetchUrl) : Promise.resolve(null),
-            ]);
-
-            if (!meResponse.ok) {
-                router.push('/login');
-                return;
-            }
-            const { user } = await meResponse.json() as any;
-            setUserId(user.id);
+            const taskResponse = taskFetchUrl ? await fetch(taskFetchUrl) : null;
 
             if (!taskIdParam) {
                 const newDateParam = searchParams.get('date');

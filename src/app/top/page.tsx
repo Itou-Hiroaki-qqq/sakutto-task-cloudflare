@@ -7,7 +7,7 @@ import TodoList from '@/components/TodoList';
 import Layout from '@/components/Layout';
 import YearMonthPicker from '@/components/YearMonthPicker';
 import { DisplayTask } from '@/types/database';
-import { format, parseISO, isSameDay, addMonths, subMonths, addDays, subDays, startOfDay, differenceInDays } from 'date-fns';
+import { format, parseISO, addMonths, subMonths, startOfDay } from 'date-fns';
 import {
     getCachedTasksForDateWithoutTTL,
     getTasksOverride,
@@ -15,6 +15,7 @@ import {
     updateTasksCache,
     isWithinCurrentMonthRange,
 } from '@/lib/tasksCache';
+import { useAuth } from '@/components/AuthProvider';
 
 function parseTasksFromAPI(tasksRaw: any[]): DisplayTask[] {
     return (tasksRaw || []).map(task => ({
@@ -29,6 +30,7 @@ function parseTasksFromAPI(tasksRaw: any[]): DisplayTask[] {
 function TopPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
+    const { userId } = useAuth();
     const [selectedDate, setSelectedDate] = useState(() => {
         const dateParam = searchParams.get('date');
         if (dateParam) { try { return parseISO(dateParam); } catch { return new Date(); } }
@@ -43,7 +45,6 @@ function TopPageContent() {
     const [tasks, setTasks] = useState<DisplayTask[]>([]);
     const [memorials, setMemorials] = useState<Array<{ id: string; title: string }>>([]);
     const [memorialHolidays, setMemorialHolidays] = useState<MemorialHolidayInfo[]>([]);
-    const [userId, setUserId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [errorToast, setErrorToast] = useState<string | null>(null);
     const [showYearMonthPicker, setShowYearMonthPicker] = useState(false);
@@ -53,43 +54,10 @@ function TopPageContent() {
 
     const completionPendingRef = useRef<{ taskId: string; completed: boolean } | null>(null);
 
-    // 認証
+    // 認証チェック（layout から userId を受け取る。null ならログインへ）
     useEffect(() => {
-        let mounted = true;
-        const run = async () => {
-            const res = await fetch('/api/auth/me');
-            if (!mounted) return;
-            if (!res.ok) { router.push('/login'); return; }
-            const { user } = await res.json() as any;
-            if (!mounted) return;
-            setUserId(user.id);
-        };
-        run();
-        return () => { mounted = false; };
-    }, [router]);
-
-    // 記念日祝日データを取得
-    useEffect(() => {
-        if (!userId) return;
-        const fetchMemorialHolidays = async () => {
-            try {
-                const res = await fetch('/api/memorials');
-                if (res.ok) {
-                    const data = await res.json() as any;
-                    const holidays: MemorialHolidayInfo[] = (data.memorials || [])
-                        .filter((m: any) => m.is_holiday)
-                        .map((m: any) => ({
-                            due_date: format(new Date(m.due_date), 'yyyy-MM-dd'),
-                            recurrence_type: m.recurrence_type || null,
-                        }));
-                    setMemorialHolidays(holidays);
-                }
-            } catch (e) {
-                console.error('Failed to load memorial holidays:', e);
-            }
-        };
-        fetchMemorialHolidays();
-    }, [userId]);
+        if (userId === null) router.push('/login');
+    }, [userId, router]);
 
     // タスク編集のバックグラウンド保存失敗時
     useEffect(() => {
@@ -104,7 +72,7 @@ function TopPageContent() {
         } catch (_) {}
     }, [userId]);
 
-    // 日付切り替え・初回ロード
+    // 日付切り替え・初回ロード（tasks + memorials + memorialHolidays を1リクエストで取得）
     useEffect(() => {
         if (!userId) return;
 
@@ -129,15 +97,12 @@ function TopPageContent() {
             }
 
             try {
-                const [tasksRes, memorialsRes] = await Promise.all([
-                    fetch(`/api/tasks?date=${dateStr}`),
-                    fetch(`/api/memorials?date=${dateStr}`),
-                ]);
+                const res = await fetch(`/api/tasks?date=${dateStr}&includeMemorials=true`);
 
                 if (!mountedRef.current) return;
 
-                if (tasksRes.ok) {
-                    const data = await tasksRes.json() as any;
+                if (res.ok) {
+                    const data = await res.json() as any;
                     const latest = parseTasksFromAPI(data.tasks || []);
 
                     if (format(selectedDateRef.current, 'yyyy-MM-dd') === dateStr) {
@@ -156,13 +121,9 @@ function TopPageContent() {
                                 );
                             }
                         }
+                        setMemorials(data.memorials || []);
+                        setMemorialHolidays(data.memorialHolidays || []);
                     }
-
-                }
-
-                if (memorialsRes.ok) {
-                    const data = await memorialsRes.json() as any;
-                    if (mountedRef.current) setMemorials(data.memorials || []);
                 }
             } catch (e) {
                 console.error('Failed to load tasks:', e);
@@ -197,67 +158,6 @@ function TopPageContent() {
             setDisplayMonth(today);
         }
     }, [searchParams]);
-
-    // プリフェッチ: 前後14日のみ、4並列で抑制的に（Workerの負荷集中を回避）
-    useEffect(() => {
-        if (!userId) return;
-        if (!isWithinCurrentMonthRange(new Date())) return;
-
-        const today = startOfDay(new Date());
-        const dates: Date[] = [];
-        const start = subDays(today, 14);
-        const end = addDays(today, 14);
-        let cur = startOfDay(start);
-        while (cur <= end) {
-            if (!isSameDay(cur, today)) dates.push(new Date(cur));
-            cur = addDays(cur, 1);
-        }
-        dates.sort((a, b) => {
-            const dA = Math.abs(differenceInDays(a, today));
-            const dB = Math.abs(differenceInDays(b, today));
-            return dA !== dB ? dA - dB : a.getTime() - b.getTime();
-        });
-
-        const phases = [
-            dates.filter(d => Math.abs(differenceInDays(d, today)) <= 1),
-            dates.filter(d => Math.abs(differenceInDays(d, today)) > 1),
-        ];
-        const delays = [200, 1000];
-        const mountedRef = { current: true };
-
-        phases.forEach((phaseDates, i) => {
-            setTimeout(async () => {
-                if (!mountedRef.current) return;
-                const toFetch = phaseDates.filter(d => {
-                    const c = getCachedTasksForDateWithoutTTL(userId, d);
-                    return c === null || c.length === 0;
-                });
-                for (let j = 0; j < toFetch.length; j += 4) {
-                    if (!mountedRef.current) break;
-                    const batch = toFetch.slice(j, j + 4);
-                    await Promise.all(batch.map(async (d) => {
-                        try {
-                            const ds = format(d, 'yyyy-MM-dd');
-                            const res = await fetch(`/api/tasks?date=${ds}`);
-                            if (res.ok && isWithinCurrentMonthRange(d)) {
-                                const data = await res.json() as any;
-                                const tasks = parseTasksFromAPI(data.tasks || []);
-                                updateTasksCache(
-                                    userId,
-                                    { [ds]: tasks },
-                                    format(subMonths(d, 1), 'yyyy-MM-dd'),
-                                    format(addMonths(d, 2), 'yyyy-MM-dd')
-                                );
-                            }
-                        } catch (_) {}
-                    }));
-                    if (j + 4 < toFetch.length) await new Promise(r => setTimeout(r, 300));
-                }
-            }, delays[i]);
-        });
-
-        return () => { mountedRef.current = false; };
-    }, [userId]);
 
     const handleDateSelect = (date: Date) => {
         setTasks([]);

@@ -5,11 +5,12 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { format, parseISO } from 'date-fns';
 import { ja } from 'date-fns/locale';
 import DatePicker from '@/components/DatePicker';
+import { useAuth } from '@/components/AuthProvider';
 
 function MemorialEditPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
-    const [userId, setUserId] = useState<string | null>(null);
+    const { userId } = useAuth();
 
     // URLパラメータから取得
     const memorialIdParam = searchParams.get('memorialId');
@@ -35,32 +36,26 @@ function MemorialEditPageContent() {
     const [loadingMemorialList, setLoadingMemorialList] = useState(false);
 
     useEffect(() => {
-        const checkAuth = async () => {
-            const res = await fetch('/api/auth/me');
-            if (!res.ok) { router.push('/login'); return; }
-            const { user } = await res.json() as any;
-            setUserId(user.id);
+        if (userId === null) { router.push('/login'); return; }
+        if (!userId) return;
 
-            // 既存記念日を編集する場合
-            if (memorialIdParam) {
-                const dateParam = searchParams.get('date');
-                loadMemorial(memorialIdParam, user.id, dateParam);
-            } else {
-                // 新規記念日作成時は、URLパラメータの日付を使用
-                const newDateParam = searchParams.get('date');
-                if (newDateParam) {
-                    try {
-                        const parsedDate = parseISO(newDateParam);
-                        setDueDate(parsedDate);
-                    } catch (e) {
-                        // パースエラーは無視
-                    }
+        // 既存記念日を編集する場合
+        if (memorialIdParam) {
+            const dateParam = searchParams.get('date');
+            loadMemorial(memorialIdParam, userId, dateParam);
+        } else {
+            // 新規記念日作成時は、URLパラメータの日付を使用
+            const newDateParam = searchParams.get('date');
+            if (newDateParam) {
+                try {
+                    const parsedDate = parseISO(newDateParam);
+                    setDueDate(parsedDate);
+                } catch (e) {
+                    // パースエラーは無視
                 }
             }
-        };
-
-        checkAuth();
-    }, [router, memorialIdParam, searchParams]);
+        }
+    }, [router, userId, memorialIdParam, searchParams]);
 
     useEffect(() => {
         if (userId) {

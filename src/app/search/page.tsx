@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Layout from '@/components/Layout';
 import { format } from 'date-fns';
 import { ja } from 'date-fns/locale';
+import { useAuth } from '@/components/AuthProvider';
 
 interface SearchResult {
     date: string;
@@ -14,21 +15,15 @@ interface SearchResult {
 
 export default function SearchPage() {
     const router = useRouter();
+    const { userId } = useAuth();
     const [searchQuery, setSearchQuery] = useState('');
     const [results, setResults] = useState<SearchResult[]>([]);
-    const [userId, setUserId] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [hasSearched, setHasSearched] = useState(false);
 
     useEffect(() => {
-        const checkAuth = async () => {
-            const res = await fetch('/api/auth/me');
-            if (!res.ok) { router.push('/login'); return; }
-            const { user } = await res.json() as any;
-            setUserId(user.id);
-        };
-        checkAuth();
-    }, [router]);
+        if (userId === null) router.push('/login');
+    }, [userId, router]);
 
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault();
