@@ -102,6 +102,27 @@ CREATE TABLE IF NOT EXISTS memorial_recurrences (
     UNIQUE (memorial_id)
 );
 
+-- 祝日テーブル（内閣府CSVから年2回自動同期。ローカル計算のフォールバックあり）
+CREATE TABLE IF NOT EXISTS holidays (
+    date TEXT PRIMARY KEY,  -- 'YYYY-MM-DD'
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,   -- 'cabinet_office' or 'holidays_jp_fallback'
+    synced_at TEXT NOT NULL
+);
+
+-- 祝日同期の実行履歴・差分ログ
+CREATE TABLE IF NOT EXISTS holidays_sync_log (
+    id TEXT PRIMARY KEY,
+    executed_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+    source TEXT,  -- 'cabinet_office' / 'holidays_jp_fallback' / NULL(失敗時)
+    added_count INTEGER DEFAULT 0,
+    updated_count INTEGER DEFAULT 0,
+    removed_count INTEGER DEFAULT 0,
+    diff_json TEXT,
+    error_message TEXT
+);
+
 -- インデックス
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
@@ -118,3 +139,4 @@ CREATE INDEX IF NOT EXISTS idx_user_notification_settings_user_id ON user_notifi
 CREATE INDEX IF NOT EXISTS idx_memorials_user_id ON memorials(user_id);
 CREATE INDEX IF NOT EXISTS idx_memorials_due_date ON memorials(due_date);
 CREATE INDEX IF NOT EXISTS idx_memorial_recurrences_memorial_id ON memorial_recurrences(memorial_id);
+CREATE INDEX IF NOT EXISTS idx_holidays_sync_log_executed_at ON holidays_sync_log(executed_at);

@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameDay, addMonths, subMonths, getDay, endOfMonth as fnsEndOfMonth, parseISO } from 'date-fns';
 import { ja } from 'date-fns/locale';
-import { getHoliday } from '@/lib/holidays';
+import { ensureHolidaysLoaded, getHolidayWithRemote, subscribeHolidaysLoaded } from '@/lib/holidaysClient';
 
 export interface MemorialHolidayInfo {
     due_date: string; // 'YYYY-MM-DD'
@@ -51,6 +51,7 @@ export default function Calendar({ currentDate, selectedDate, displayMonth: prop
     const [isTransitioning, setIsTransitioning] = useState(false);
     const [dragStart, setDragStart] = useState<number | null>(null);
     const [touchStart, setTouchStart] = useState<number | null>(null);
+    const [, forceHolidayRerender] = useState(0);
 
     useEffect(() => {
         if (propDisplayMonth) {
@@ -72,6 +73,12 @@ export default function Calendar({ currentDate, selectedDate, displayMonth: prop
         start: calendarStart,
         end: calendarEnd,
     });
+
+    useEffect(() => {
+        const years = new Set(calendarDays.map(day => day.getFullYear()));
+        years.forEach(year => ensureHolidaysLoaded(year));
+        return subscribeHolidaysLoaded(() => forceHolidayRerender(n => n + 1));
+    }, [displayMonth]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handlePreviousMonth = () => {
         setIsTransitioning(true);
@@ -169,7 +176,7 @@ export default function Calendar({ currentDate, selectedDate, displayMonth: prop
                             const isCurrentMonth = isSameMonth(day, displayMonth);
                             const isSelected = isSameDay(day, selectedDate);
                             const isToday = isSameDay(day, new Date());
-                            const holiday = getHoliday(day);
+                            const holiday = getHolidayWithRemote(day);
                             const isNationalHoliday = holiday !== undefined;
                             const isMemorialHoliday = isCurrentMonth && isMemorialHolidayDate(day, memorialHolidays || []);
 

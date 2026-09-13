@@ -28,25 +28,23 @@ export function isHoliday(date: Date): boolean {
     return getHoliday(date) !== undefined;
 }
 
+// 春分の日・秋分の日の日付を天文学的近似式で計算する
+// 出典: 国立天文台の暦要項に基づく近似式（1980〜2099年の範囲で有効）
+// 内閣府が公式発表する暦要項（当年+1年分のみ）が未反映の年でも、この近似式で
+// 実際の日付とほぼ一致する値を計算できる
+function getVernalEquinoxDay(year: number): number {
+    return Math.floor(20.8431 + 0.242194 * (year - 1980)) - Math.floor((year - 1980) / 4);
+}
+
+function getAutumnalEquinoxDay(year: number): number {
+    return Math.floor(23.2488 + 0.242194 * (year - 1980)) - Math.floor((year - 1980) / 4);
+}
+
 function generateHolidays(): Holiday[] {
     const generated: Holiday[] = [];
     const currentYear = new Date().getFullYear();
 
-    const springEquinoxDates: { [key: number]: number } = {
-        2026: 20, 2027: 21, 2028: 20, 2029: 20, 2030: 20,
-        2031: 21, 2032: 20, 2033: 20, 2034: 20, 2035: 21,
-        2036: 20, 2037: 20, 2038: 20, 2039: 21, 2040: 20,
-        2041: 20, 2042: 20, 2043: 21, 2044: 20, 2045: 20, 2046: 20
-    };
-
-    const autumnEquinoxDates: { [key: number]: number } = {
-        2026: 23, 2027: 23, 2028: 22, 2029: 23, 2030: 23,
-        2031: 23, 2032: 22, 2033: 23, 2034: 23, 2035: 23,
-        2036: 22, 2037: 23, 2038: 23, 2039: 23, 2040: 22,
-        2041: 23, 2042: 23, 2043: 23, 2044: 22, 2045: 23, 2046: 23
-    };
-
-    for (let year = currentYear; year <= currentYear + 20; year++) {
+    for (let year = currentYear - 1; year <= currentYear + 20; year++) {
         generated.push({ date: new Date(year, 0, 1), name: '元日', type: 'national' });
         generated.push({ date: new Date(year, 0, 2), name: '銀行休業日', type: 'bank' });
         generated.push({ date: new Date(year, 0, 3), name: '銀行休業日', type: 'bank' });
@@ -60,21 +58,52 @@ function generateHolidays(): Holiday[] {
         generated.push({ date: new Date(year, 10, 23), name: '勤労感謝の日', type: 'national' });
 
         generated.push({ date: getNthMondayOfMonth(year, 0, 2), name: '成人の日', type: 'national' });
-
-        if (springEquinoxDates[year]) {
-            generated.push({ date: new Date(year, 2, springEquinoxDates[year]), name: '春分の日', type: 'national' });
-        }
-
         generated.push({ date: getNthMondayOfMonth(year, 6, 3), name: '海の日', type: 'national' });
         generated.push({ date: new Date(year, 7, 11), name: '山の日', type: 'national' });
         generated.push({ date: getNthMondayOfMonth(year, 8, 3), name: '敬老の日', type: 'national' });
 
-        if (autumnEquinoxDates[year]) {
-            generated.push({ date: new Date(year, 8, autumnEquinoxDates[year]), name: '秋分の日', type: 'national' });
-        }
+        generated.push({ date: new Date(year, 2, getVernalEquinoxDay(year)), name: '春分の日', type: 'national' });
+        generated.push({ date: new Date(year, 8, getAutumnalEquinoxDay(year)), name: '秋分の日', type: 'national' });
     }
 
-    return generated;
+    const nationalDates = generated.filter(h => h.type === 'national');
+    const nationalKeySet = new Set(nationalDates.map(h => formatDateKey(h.date)));
+
+    // 国民の休日: 前日・翌日がともに「国民の祝日」で、当日自体は祝日でも
+    // 日曜日でもない日（例: 敬老の日と秋分の日に挟まれた火曜日）
+    const citizensHolidays: Holiday[] = [];
+    for (const h of nationalDates) {
+        const nextDay = new Date(h.date);
+        nextDay.setDate(nextDay.getDate() + 2);
+        if (nextDay.getDay() === 0) continue; // 挟まれる日が日曜なら不要（休日として別扱い）
+
+        const middleDay = new Date(h.date);
+        middleDay.setDate(middleDay.getDate() + 1);
+        const middleKey = formatDateKey(middleDay);
+
+        if (nationalKeySet.has(middleKey)) continue;
+        if (!nationalKeySet.has(formatDateKey(nextDay))) continue;
+
+        citizensHolidays.push({ date: middleDay, name: '国民の休日', type: 'national' });
+    }
+
+    const allNational = [...nationalDates, ...citizensHolidays];
+    const allNationalKeySet = new Set(allNational.map(h => formatDateKey(h.date)));
+
+    // 振替休日: 「国民の祝日」（国民の休日を含む）が日曜日と重なった場合、
+    // 日曜でも祝日でもない直近の平日に振り替える
+    const substitutes: Holiday[] = [];
+    for (const h of allNational) {
+        if (h.date.getDay() !== 0) continue;
+        const next = new Date(h.date);
+        do {
+            next.setDate(next.getDate() + 1);
+        } while (next.getDay() === 0 || allNationalKeySet.has(formatDateKey(next)));
+        allNationalKeySet.add(formatDateKey(next));
+        substitutes.push({ date: next, name: '振替休日', type: 'national' });
+    }
+
+    return [...generated, ...citizensHolidays, ...substitutes];
 }
 
 function getNthMondayOfMonth(year: number, month: number, n: number): Date {

@@ -1,9 +1,10 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { DisplayTask } from '@/types/database';
 import { format, isSameDay } from 'date-fns';
 import { ja } from 'date-fns/locale';
-import { getHoliday } from '@/lib/holidays';
+import { ensureHolidaysLoaded, getHolidayWithRemote, subscribeHolidaysLoaded } from '@/lib/holidaysClient';
 import Link from 'next/link';
 
 interface TodoListProps {
@@ -14,7 +15,14 @@ interface TodoListProps {
 }
 
 export default function TodoList({ date, tasks, onToggleCompletion, memorials = [] }: TodoListProps) {
-    const holiday = getHoliday(date);
+    const [, forceHolidayRerender] = useState(0);
+
+    useEffect(() => {
+        ensureHolidaysLoaded(date.getFullYear());
+        return subscribeHolidaysLoaded(() => forceHolidayRerender(n => n + 1));
+    }, [date]);
+
+    const holiday = getHolidayWithRemote(date);
     const dateStr = format(date, 'yyyy年M月d日(E)', { locale: ja });
 
     // ソート: 未完了(通常) → 未完了(引継ぎ) → 完了(通常) → 完了(引継ぎ)

@@ -9,7 +9,8 @@
     "preview": "npm run cf:build && wrangler dev",
     "deploy": "npm run cf:build && wrangler deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv",
-    "start": "next start"
+    "start": "next start",
+    "test": "vitest run"
   },
   "dependencies": {
     "daisyui": "^5.5.14",
@@ -28,8 +29,10 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "iconv-lite": "^0.7.2",
     "tailwindcss": "^4",
     "typescript": "^5",
+    "vitest": "^3.0.0",
     "wrangler": "^4.0.0"
   }
 }
