@@ -308,14 +308,22 @@ function TopPageContent() {
 }
 
 export default function TopPage() {
+    // 「今日」の日付はブラウザ側でしか正しく決まらない。サーバー(UTC)でHTMLを作ると
+    // 日本時間の朝は前日になり、ハイドレーション時にclass/hrefの不一致が修正されず
+    // 前日が選択・今日ハイライトとして残ってしまうため、マウント後にのみ描画する。
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => { setMounted(true); }, []);
+
+    const spinner = (
+        <div className="min-h-screen flex items-center justify-center">
+            <span className="loading loading-spinner loading-lg"></span>
+        </div>
+    );
+
+    if (!mounted) return spinner;
+
     return (
-        <Suspense fallback={
-            <Layout>
-                <div className="min-h-screen flex items-center justify-center">
-                    <span className="loading loading-spinner loading-lg"></span>
-                </div>
-            </Layout>
-        }>
+        <Suspense fallback={spinner}>
             <TopPageContent />
         </Suspense>
     );
