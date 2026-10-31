@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser } from '@/lib/auth';
 import { getCloudflareContext } from '@opennextjs/cloudflare';
+import {
+    ALLOWED_MIME_TYPES,
+    MAX_FILE_BYTES,
+    MAX_TOTAL_BYTES,
+    consumeGeminiQuota,
+} from '@/lib/geminiGuard';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -114,6 +120,26 @@ export async function POST(request: NextRequest) {
         if (files.length > 2) {
             return NextResponse.json({ error: 'Maximum 2 files allowed' }, { status: 400 });
         }
+
+        // ファイルの種類とサイズを確認する（巨大なファイルや想定外の形式でAIを呼ばせない）
+        let totalBytes = 0;
+        for (const file of files) {
+            const type = file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
+            if (!ALLOWED_MIME_TYPES.includes(type)) {
+                return NextResponse.json({ error: 'Unsupported file type' }, { status: 400 });
+            }
+            if (file.size > MAX_FILE_BYTES) {
+                return NextResponse.json({ error: 'File is too large' }, { status: 413 });
+            }
+            totalBytes += file.size;
+        }
+        if (totalBytes > MAX_TOTAL_BYTES) {
+            return NextResponse.json({ error: 'Files are too large' }, { status: 413 });
+        }
+
+        // 1日の利用回数の上限を確認する（費用の使いすぎを防ぐ）
+        const limited = await consumeGeminiQuota(env.DB, payload.uid);
+        if (limited) return limited;
 
         const base64Images: string[] = [];
         const mimeTypes: string[] = [];
