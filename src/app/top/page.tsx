@@ -4,6 +4,8 @@ import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Calendar, { MemorialHolidayInfo } from '@/components/Calendar';
 import TodoList from '@/components/TodoList';
+import MemoPanel, { MemoPanelHandle } from '@/components/MemoPanel';
+import { useHorizontalSwipe } from '@/lib/useHorizontalSwipe';
 import Layout from '@/components/Layout';
 import YearMonthPicker from '@/components/YearMonthPicker';
 import { DisplayTask } from '@/types/database';
@@ -13,6 +15,7 @@ import {
     getTasksOverride,
     clearTasksOverride,
     updateTasksCache,
+    clearAllTasksCache,
     isWithinCurrentMonthRange,
 } from '@/lib/tasksCache';
 import { useAuth } from '@/components/AuthProvider';
@@ -48,6 +51,18 @@ function TopPageContent() {
     const [loading, setLoading] = useState(true);
     const [errorToast, setErrorToast] = useState<string | null>(null);
     const [showYearMonthPicker, setShowYearMonthPicker] = useState(false);
+
+    const [memoOpen, setMemoOpen] = useState(false);
+    const [reloadKey, setReloadKey] = useState(0);
+    const memoPanelRef = useRef<MemoPanelHandle>(null);
+
+    // タスクゾーンを右へスワイプ → なんでもメモを開き、すぐ入力できる状態にする
+    const taskZoneSwipe = useHorizontalSwipe({
+        onSwipeRight: () => {
+            setMemoOpen(true);
+            memoPanelRef.current?.focusNew();
+        },
+    });
 
     const selectedDateRef = useRef<Date>(selectedDate);
     useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
@@ -134,7 +149,7 @@ function TopPageContent() {
 
         load();
         return () => { mountedRef.current = false; };
-    }, [userId, selectedDate]);
+    }, [userId, selectedDate, reloadKey]);
 
     // URLパラメータと日付の同期
     useEffect(() => {
@@ -287,7 +302,10 @@ function TopPageContent() {
                             onYearMonthClick={handleOpenYearMonthPicker}
                         />
                     </div>
-                    <div className="w-full lg:w-2/3 lg:order-1">
+                    <div
+                        {...taskZoneSwipe}
+                        className="w-full lg:w-2/3 lg:order-1 touch-pan-y select-none min-h-[50vh]"
+                    >
                         {loading ? (
                             <div className="flex items-center justify-center py-12">
                                 <span className="loading loading-spinner loading-lg"></span>
@@ -303,6 +321,16 @@ function TopPageContent() {
                     </div>
                 </div>
             </div>
+            <MemoPanel
+                ref={memoPanelRef}
+                open={memoOpen}
+                onClose={() => setMemoOpen(false)}
+                selectedDate={selectedDate}
+                onMoved={() => {
+                    clearAllTasksCache();
+                    setReloadKey((n) => n + 1);
+                }}
+            />
         </Layout>
     );
 }

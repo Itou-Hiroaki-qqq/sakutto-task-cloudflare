@@ -140,3 +140,14 @@ CREATE INDEX IF NOT EXISTS idx_memorials_user_id ON memorials(user_id);
 CREATE INDEX IF NOT EXISTS idx_memorials_due_date ON memorials(due_date);
 CREATE INDEX IF NOT EXISTS idx_memorial_recurrences_memorial_id ON memorial_recurrences(memorial_id);
 CREATE INDEX IF NOT EXISTS idx_holidays_sync_log_executed_at ON holidays_sync_log(executed_at);
+
+-- なんでもメモテーブル
+CREATE TABLE IF NOT EXISTS memos (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memos_user_created ON memos(user_id, created_at);
