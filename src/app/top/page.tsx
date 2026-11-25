@@ -56,9 +56,9 @@ function TopPageContent() {
     const [reloadKey, setReloadKey] = useState(0);
     const memoPanelRef = useRef<MemoPanelHandle>(null);
 
-    // タスクゾーンを右へスワイプ → なんでもメモを開き、すぐ入力できる状態にする
+    // タスクゾーンを右から左へスワイプ → なんでもメモを開き、すぐ入力できる状態にする
     const taskZoneSwipe = useHorizontalSwipe({
-        onSwipeRight: () => {
+        onSwipeLeft: () => {
             setMemoOpen(true);
             memoPanelRef.current?.focusNew();
         },

@@ -97,7 +97,7 @@ export default function MemoPanel({ open, onClose, selectedDate, onMoved, ref }:
     }, [open, onClose, moving]);
 
     const swipe = useHorizontalSwipe({
-        onSwipeLeft: onClose,
+        onSwipeRight: onClose,
         ignoreMouseSelector: 'textarea',
     });
 
@@ -208,10 +208,10 @@ export default function MemoPanel({ open, onClose, selectedDate, onMoved, ref }:
             >
                 <div className="flex items-center justify-between bg-base-100 px-4 py-3 shadow pt-[max(0.75rem,env(safe-area-inset-top))]">
                     <h2 className="text-lg font-bold">なんでもメモ</h2>
-                    <span className="text-xs text-base-content/50">← 左へスワイプで戻る</span>
+                    <span className="text-xs text-base-content/50">右へスワイプで戻る →</span>
                 </div>
 
-                <div ref={listRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-2">
+                <div ref={listRef} className="flex-1 overflow-y-auto touch-pan-y px-4 py-4 space-y-2">
                     {memos.map((memo) => (
                         <MemoRow
                             key={memo.id}
@@ -224,7 +224,7 @@ export default function MemoPanel({ open, onClose, selectedDate, onMoved, ref }:
                         />
                     ))}
 
-                    <div className="flex items-start gap-2 p-3 rounded-lg bg-base-100 shadow">
+                    <div className="flex items-start gap-2 p-3 rounded-lg bg-base-100 shadow touch-pan-y">
                         <AutoTextarea
                             ref={newRef}
                             value={newText}
@@ -300,7 +300,7 @@ function MemoRow({
     };
 
     return (
-        <div className="flex items-start gap-1 p-3 rounded-lg bg-base-100 shadow">
+        <div className="flex items-start gap-1 p-3 rounded-lg bg-base-100 shadow touch-pan-y">
             <AutoTextarea
                 value={text}
                 onChange={setText}
@@ -375,7 +375,7 @@ function AutoTextarea({
             tabIndex={tabIndex}
             maxLength={maxLength}
             enterKeyHint="done"
-            className="flex-1 min-w-0 resize-none bg-transparent outline-none py-1 leading-relaxed"
+            className="flex-1 min-w-0 resize-none bg-transparent outline-none py-1 leading-relaxed touch-pan-y"
             onChange={(e) => onChange(e.target.value.replace(/\n/g, ''))}
             onBlur={onBlur}
             onKeyDown={(e) => {
