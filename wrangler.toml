@@ -1,5 +1,5 @@
 name = "sakutto-task"
-main = ".open-next/worker.js"
+main = "custom-worker.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -10,3 +10,7 @@ directory = ".open-next/assets"
 binding = "DB"
 database_name = "sakutto-task-db"
 database_id = "75b7aa40-1655-46ae-bb20-52b67e1b4679"  # wrangler d1 create sakutto-task-db で発行
+
+# 毎分、通知メールを送る（custom-worker.ts の scheduled() が /api/cron/notifications を呼ぶ）
+[triggers]
+crons = ["*/1 * * * *"]

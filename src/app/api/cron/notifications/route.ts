@@ -5,7 +5,7 @@ import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 
 // Cloudflare Cron Triggerから呼び出されるエンドポイント
-// wrangler.toml: crons = ["*/1 * * * *"] で1分ごとに実行される
+// wrangler.toml の [triggers] crons = ["*/1 * * * *"] で1分ごとに、custom-worker.ts の scheduled() が内部呼び出しする
 export async function POST(request: NextRequest) {
     try {
         const { env } = await getCloudflareContext({ async: true });
